@@ -7,6 +7,7 @@ import asyncio
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from activities import run_swe_agent_activity
 from workflows.pipeline_workflow import AgentPipelineWorkflow
 
 TASK_QUEUE = "agent-factory-pipeline"
@@ -18,7 +19,8 @@ async def main() -> None:
         client,
         task_queue=TASK_QUEUE,
         workflows=[AgentPipelineWorkflow],
-        # TODO: register activities for build/sandbox-test/gate/register/deploy
+        activities=[run_swe_agent_activity],
+        # TODO: register remaining activities for sandbox-test/gate/register/deploy
     )
     await worker.run()
 
