@@ -46,7 +46,11 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
 def clone_and_checkout(repo: str, branch: str, work_root: Path) -> Path:
     _validate_repo(repo)
     _validate_branch(branch)
-    _run(["gh", "repo", "clone", repo, str(work_root)])
+    # git clone via an explicit https URL, not `gh repo clone` — the
+    # latter defers to the local gh CLI's configured git_protocol
+    # (per-host in ~/.config/gh/hosts.yml), which may be set to ssh with
+    # no working key, as it was on this machine.
+    _run(["git", "clone", f"https://github.com/{repo}.git", str(work_root)])
     _run(["git", "fetch", "origin", branch], cwd=work_root)
     _run(["git", "checkout", branch], cwd=work_root)
     return work_root
