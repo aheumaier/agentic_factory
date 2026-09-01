@@ -14,10 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY harness/swe-agent/pyproject.toml ./
+# Mirrors the single dependency in harness/swe-agent/pyproject.toml; the
+# project isn't pip-installable (no build-system), so it's named directly.
 RUN pip install --no-cache-dir claude-agent-sdk
 
 COPY harness/swe-agent/agent.py ./agent.py
 
-# ANTHROPIC_API_KEY (and, later, a scoped GH_TOKEN) are passed as sandbox
-# env vars at creation time, not baked into the image.
+# ANTHROPIC_API_KEY and GH_TOKEN are passed as sandbox env vars at
+# creation time (see .github/workflows/swe-agent-build.yml), never baked
+# into the image.

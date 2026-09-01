@@ -1,0 +1,119 @@
+name: swe-agent-build
+
+# Reusable workflow (Harness/Runtime, §3.2) — holds all the real logic for
+# a GitHub-comment-triggered swe-agent run. Callers never copy this file;
+# they invoke it via `uses:` (see swe-agent-trigger.yml for the ~10-line
+# caller). Runs in the calling repo's workflow context, so
+# github.repository / github.event are the caller's, not this repo's.
+#
+# All values with attacker-shapeable content (PR branch name, in
+# particular — git ref-name rules allow `$`, `(`, `)`, etc.) are passed
+# into `run:` steps via `env:` and referenced as `"$VAR"`, never
+# interpolated directly via `${{ }}` into a shell command — a directly
+# interpolated `${{ }}` is substituted before the shell parses the line,
+# so special characters in the value are not protected by later quoting.
+on:
+  workflow_call: {}
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  build:
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '@swe-agent build') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    # Job-level env is limited to contexts available before any step runs,
+    # so the app token (a `steps.` output) stays per-step below.
+    env:
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.SWE_AGENT_APP_ID }}
+          private-key: ${{ secrets.SWE_AGENT_APP_PRIVATE_KEY }}
+
+      - name: resolve PR head branch
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          pr="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName,isCrossRepository)"
+          if [ "$(jq -r .isCrossRepository <<<"$pr")" = "true" ]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" \
+              --body "swe-agent: forked-repo PRs aren't supported yet — same-repo branches only."
+            echo "Cross-repo PR, refusing." >&2
+            exit 1
+          fi
+          echo "branch=$(jq -r .headRefName <<<"$pr")" >> "$GITHUB_OUTPUT"
+
+      - name: create sandbox
+        id: sandbox
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          out="$(npx --yes @e2b/cli sandbox create swe-agent-sandbox -d --timeout 900 \
+            -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+            -e GH_TOKEN="$GH_TOKEN")"
+          echo "$out"
+          # The CLI prints prose, not JSON: take the last id-shaped token.
+          # Assigned (not inlined) so `set -e` still fails the step if the
+          # output shape ever changes and nothing matches.
+          sandbox_id="$(grep -oE '[a-zA-Z0-9]+-[a-zA-Z0-9]+' <<<"$out" | tail -n1)"
+          echo "id=$sandbox_id" >> "$GITHUB_OUTPUT"
+
+      - name: run agent in sandbox
+        id: run
+        continue-on-error: true
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ steps.pr.outputs.branch }}
+          SANDBOX_ID: ${{ steps.sandbox.outputs.id }}
+        run: |
+          set -euo pipefail
+          npx --yes @e2b/cli sandbox exec \
+            -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+            -e GH_TOKEN="$GH_TOKEN" \
+            "$SANDBOX_ID" \
+            -- python3 /app/agent.py "$REPO" "$BRANCH" \
+            | tee agent-output.txt
+
+      - name: kill sandbox
+        if: always()
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          SANDBOX_ID: ${{ steps.sandbox.outputs.id }}
+        run: npx --yes @e2b/cli sandbox kill "$SANDBOX_ID" || true
+
+      - name: post result to PR
+        if: always() && steps.pr.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -euo pipefail
+          # Built as a file, not a shell string, so the fenced code block
+          # needs no backtick/format-string escaping.
+          {
+            if [ "$RUN_OUTCOME" = "success" ]; then
+              echo "swe-agent finished: $(tail -n 1 agent-output.txt 2>/dev/null || echo '(no output captured)')"
+            else
+              echo 'swe-agent run failed. Last output:'
+              echo '```'
+              tail -n 40 agent-output.txt 2>/dev/null || echo '(no output captured)'
+              echo '```'
+            fi
+          } > comment.md
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file comment.md
