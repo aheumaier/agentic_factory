@@ -1,7 +1,11 @@
 ---
 name: <kebab-case-agent-name>
 owner: <email or team>
+goal: <one paragraph — what this agent does>
 tools: []
+guardrails:
+  out_of_scope: []
+  requires_human_approval: []
 success_criteria: []
 ---
 
