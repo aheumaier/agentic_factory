@@ -1,0 +1,13 @@
+name: swe-agent
+owner: andreas.heumaier@sdui.de
+current_version: v1
+status: active
+description: >-
+  GitHub-issue-driven SWE agent (Harness/Runtime, §3.2) that runs GitHub
+  Spec Kit's /speckit-implement against an already-planned feature branch
+  and opens a PR. Implement-only this pass — see versions/v1.yaml and
+  harness/swe-agent/SKILL.md for what's deferred.
+design_docs:
+  - agent-swe-design.md
+  - harness/swe-agent/SKILL.md
+  - prompts/agentic-swe.json
