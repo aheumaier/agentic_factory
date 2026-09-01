@@ -1,0 +1,10 @@
+# Execution Sandbox (§3.3) for harness/swe-agent. Built via the E2B CLI
+# (`npx @e2b/cli template create`, driven from repo root — see Dockerfile
+# for the exact build-context note); this file records the template's
+# identity/shape for reference, matching the sibling `sandbox/e2b.toml`
+# convention. E2B has no self-host OSS tier; pilot volume fits the free
+# Hobby tier (100 sbx-hr/mo).
+template_id = "swe-agent-sandbox"
+dockerfile = "Dockerfile"
+cpu_count = 2
+memory_mb = 1024
