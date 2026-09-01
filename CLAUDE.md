@@ -21,13 +21,14 @@ Nothing here is wired end-to-end. Each layer directory is a scaffold with
 
 | Layer | Dir | Building block | State |
 |---|---|---|---|
-| Spec/Intake | `spec/` | JSON Schema + triage policy | Schema + policy written, no enforcement code |
+| Spec/Intake | `spec/` | JSON Schema + triage policy | Schema + policy written; enforced only by `tests/test_agent_spec_schema.py` (template/schema key drift), no runtime intake enforcement |
 | Harness/Runtime | `harness/template-agent/` | Claude Agent SDK (Python) | `agent.py` is a stub `query()` call, no tool binding |
-| Execution Sandbox | `sandbox/` | E2B | Dockerfile + `e2b.toml`, not invoked by anything yet |
-| Inference Routing | `litellm/` | LiteLLM proxy (self-hosted) | Runnable via docker-compose, one `claude-sonnet` route configured |
+| Harness/Runtime | `harness/swe-agent/` | Claude Agent SDK (Python) + Spec Kit | Real, implement-only agent: runs `/speckit-implement` on a pre-planned feature branch, commits, pushes, opens a PR. Registered in `registry/agents/swe-agent/`. See its `SKILL.md` for deferred scope |
+| Execution Sandbox | `sandbox/` | E2B | Dockerfile + `e2b.toml`, not invoked by anything yet — `swe-agent` runs unsandboxed in a host tempdir instead |
+| Inference Routing | `litellm/` | LiteLLM proxy (self-hosted) | Runnable via docker-compose, one `claude-sonnet` route configured; not used by `swe-agent` (goes direct to Anthropic, see below) |
 | Orchestration | `orchestration/` | Temporal (self-hosted) | Worker connects and registers a workflow; workflow body raises `NotImplementedError` |
-| Eval/Gating | `eval/` | Braintrust + Langfuse | `eval.config.py` functions all raise `NotImplementedError`; `gate-policy.md` defines the threshold |
-| Deployment/Lifecycle | `registry/` | git-backed catalog + CI gate | Layout documented, CI check (`registry-gate.yml`) works, `registry/agents/` is empty |
+| Eval/Gating | `eval/` | Braintrust + Langfuse | `eval.config.py` functions all raise `NotImplementedError`; `gate-policy.md` defines the threshold; `swe-agent`'s manifest hardcodes `eval_gate_passed: false` |
+| Deployment/Lifecycle | `registry/` | git-backed catalog + CI gate | CI check (`registry-gate.yml`) works; `registry/agents/swe-agent/` is the one real entry (`status: experimental`, `requires_human_supervision: true`) |
 | Observability | `observability/` | Langfuse (self-hosted) | Just env template; Langfuse itself runs via docker-compose |
 
 When implementing a layer, wire it per that layer's section in
@@ -43,12 +44,17 @@ make down                 # docker compose down
 make logs                 # docker compose logs -f
 make worker                # runs orchestration/worker.py (Temporal worker; requires `make up` first)
 make gate                  # runs eval/braintrust/eval.config.py (currently raises — not wired)
+uv run pytest              # run the repo-root test suite (tests/), from root pyproject.toml + uv.lock
 ```
 
-No test suite, linter, or package manager lockfile exists yet at the repo
-root. `harness/template-agent/pyproject.toml` declares that one agent's
-Python deps (`claude-agent-sdk`, `openai`); there is no root-level Python
-project.
+The root `pyproject.toml`/`uv.lock` is dev/test tooling only (`pytest`,
+`pyyaml`) for the repo root — it is not a package meant to be installed.
+Each agent under `harness/<agent>/` has its own separate `pyproject.toml`
+for its own runtime deps (e.g. `harness/swe-agent/pyproject.toml` declares
+just `claude-agent-sdk`); don't conflate the two when adding a dependency —
+add runtime deps to the agent's own file, test/dev tooling to the root one.
+
+No linter is configured yet.
 
 Service ports (docker-compose): Temporal 7233, Temporal UI 8080, Langfuse
 3000, LiteLLM proxy 4000.
@@ -78,9 +84,24 @@ Service ports (docker-compose): Temporal 7233, Temporal UI 8080, Langfuse
   sequences *spec -> build -> sandbox -> gate -> register -> deploy ->
   monitor*; an agent's own plan/tool-call/observe loop runs inside the Build
   and Sandbox Test steps via the Claude Agent SDK.
-- `prompts/agentic-swe.json` is the system-prompt-as-data for the example
-  SWE agent in `agent-swe-design.md` — treat it as that design doc's
-  implementation artifact, keep the two in sync if either changes.
-- `markdown-lsp-0.1.3/` is a vendored, third-party Claude Code plugin
-  (Markdown LSP support) unrelated to the agent factory's own architecture —
-  don't treat it as part of this pipeline's code.
+- `prompts/agentic-swe.json` is the system-prompt-as-data for the SWE agent
+  (`harness/swe-agent/`) designed in `agent-swe-design.md` — treat it as
+  that design doc's implementation artifact, keep the two in sync if
+  either changes.
+- **Feature work in this repo is planned with GitHub Spec Kit
+  (`.specify/`), not ad hoc.** `/speckit-specify` → `/speckit-plan` →
+  `/speckit-tasks` produce a `specs/NNN-slug/` directory (spec, plan,
+  tasks, checklists) *before* any implementation branch exists; only then
+  does `/speckit-implement` (or `harness/swe-agent`, which wraps that same
+  skill) write code. `specs/001-agent-spec-schema-test/` is the existing
+  example. Don't hand-write a feature's code without a matching
+  `specs/NNN-slug/` behind it — that directory is what `swe-agent` and any
+  human reviewer expect to diff the implementation against.
+- **`harness/swe-agent` is a real, runnable agent, not a stub** — it's the
+  one entry in `registry/agents/`. It starts at `/speckit-implement`
+  (spec/plan/tasks are done upstream, manually), runs unsandboxed in a
+  host tempdir, goes direct-to-Anthropic (not LiteLLM-routed), and reuses
+  the host's already-authenticated `gh` CLI. Its manifest marks
+  `status: experimental` and `requires_human_supervision: true` — treat
+  every run as supervised, not autonomous, per its `SKILL.md`'s "Known
+  gap" section.
