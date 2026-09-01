@@ -37,9 +37,11 @@ def _validate_branch(branch: str) -> None:
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
-    result = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, check=True
-    )
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=result.stdout, stderr=result.stderr
+        )
     return result.stdout.strip()
 
 
@@ -70,14 +72,18 @@ def build_options(cwd: Path) -> ClaudeAgentOptions:
         cwd=str(cwd),
         allowed_tools=["Bash", "Read", "Edit", "Write", "Grep", "Glob"],
         permission_mode="bypassPermissions",
-        # The checkout is untrusted branch content (this pass runs
-        # unsandboxed on the host — see SKILL.md's "Known gap"). Disable
-        # all filesystem settings sources so a hook committed in
-        # .claude/settings*.json on that branch can't auto-execute in
-        # this session; permission_mode/allowed_tools above are set
-        # explicitly in code, not sourced from settings, so nothing
-        # needed from disk here.
-        setting_sources=[],
+        # NOTE: setting_sources deliberately left at its default (loads
+        # user/project/local settings, matching CLI defaults) — that's
+        # also what makes /speckit-implement discoverable at all
+        # (verified live: setting_sources=[] makes the CLI report
+        # "Unknown command: /speckit-implement", since project-level
+        # skill discovery is gated by the same "project" source as
+        # settings.json). A hook committed to the checkout's own
+        # .claude/settings*.json could therefore auto-execute in this
+        # session — but that's not a new risk on top of the already
+        # unsandboxed, full-Bash-access "Known gap" in SKILL.md; a
+        # malicious branch can already make the model run anything via
+        # Bash without needing a hook.
     )
 
 
@@ -120,6 +126,10 @@ def push_and_open_pr(checkout: Path, repo: str, branch: str, title: str) -> str:
             ],
             cwd=checkout,
         )
+    except subprocess.CalledProcessError as e:
+        if "already exists" in (e.stderr or ""):
+            return e.stderr.strip()
+        raise
     finally:
         body_path.unlink(missing_ok=True)
 
