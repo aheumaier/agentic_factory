@@ -13,9 +13,12 @@ from claude_agent_sdk import ClaudeAgentOptions, query
 IMPLEMENT_PROMPT = """/speckit-implement
 
 After implementing, run this repo's existing tests/verification locally \
-to confirm the change works. When you are done, STOP: do not run `git \
-push` and do not open a pull request. A separate step outside this \
-conversation handles pushing and opening the PR."""
+to confirm the change works. Then commit your changes locally with \
+`git add -A && git commit` — including if local verification doesn't \
+fully pass, in which case say why in the commit message; a human \
+reviews the result either way. When you are done, STOP: do not run \
+`git push` and do not open a pull request. A separate step outside \
+this conversation handles pushing and opening the PR."""
 
 # repo/branch are workflow inputs (ultimately caller-supplied) threaded
 # straight into git/gh argv. Reject anything not shaped like a plain
@@ -103,6 +106,19 @@ def verify_left_main(checkout: Path, branch: str) -> None:
         )
 
 
+def _head_sha(checkout: Path) -> str:
+    return _run(["git", "rev-parse", "HEAD"], cwd=checkout)
+
+
+def verify_new_commit(checkout: Path, sha_before: str) -> None:
+    if _head_sha(checkout) == sha_before:
+        raise RuntimeError(
+            "Agent made no new commit — nothing to push. It may have "
+            "produced only uncommitted changes (or none at all); rerun "
+            "with the prompt's commit instruction, or inspect manually."
+        )
+
+
 def _pr_body_from_spec(checkout: Path) -> str:
     spec_files = glob.glob(str(checkout / "specs" / "*" / "spec.md"))
     if not spec_files:
@@ -149,8 +165,10 @@ def verify_pr_exists(repo: str, branch: str) -> str:
 async def run(repo: str, branch: str, work_root: Path) -> str:
     checkout = clone_and_checkout(repo, branch, work_root)
     verify_spec_exists(checkout)
+    sha_before = _head_sha(checkout)
     await run_implement(checkout)
     verify_left_main(checkout, branch)
+    verify_new_commit(checkout, sha_before)
     title = f"Implement {branch}"
     push_and_open_pr(checkout, repo, branch, title)
     return verify_pr_exists(repo, branch)
