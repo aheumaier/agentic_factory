@@ -1,7 +1,9 @@
 name: swe-agent
 owner: andreas.heumaier@sdui.de
 current_version: v1
-status: active
+status: experimental
+eval_gate_passed: false
+requires_human_supervision: true
 description: >-
   GitHub-issue-driven SWE agent (Harness/Runtime, §3.2) that runs GitHub
   Spec Kit's /speckit-implement against an already-planned feature branch

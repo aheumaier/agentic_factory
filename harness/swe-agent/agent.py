@@ -4,6 +4,7 @@ already produced upstream (Spec/Intake, §3.1, done manually), then opens
 a PR. See SKILL.md for what's deliberately deferred this pass.
 """
 import glob
+import re
 import subprocess
 from pathlib import Path
 
@@ -16,6 +17,24 @@ to confirm the change works. When you are done, STOP: do not run `git \
 push` and do not open a pull request. A separate step outside this \
 conversation handles pushing and opening the PR."""
 
+# repo/branch are workflow inputs (ultimately caller-supplied) threaded
+# straight into git/gh argv. Reject anything not shaped like a plain
+# "owner/name" repo slug or git ref, so a value like "--upload-pack=..."
+# can't be parsed as a flag by git/gh (argument injection) instead of a
+# positional repo/branch name.
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./-]*$")
+
+
+def _validate_repo(repo: str) -> None:
+    if not _REPO_RE.match(repo):
+        raise ValueError(f"Refusing to use unexpected repo value: {repo!r}")
+
+
+def _validate_branch(branch: str) -> None:
+    if not _BRANCH_RE.match(branch) or branch.startswith("-"):
+        raise ValueError(f"Refusing to use unexpected branch value: {branch!r}")
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(
@@ -25,6 +44,8 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
 
 
 def clone_and_checkout(repo: str, branch: str, work_root: Path) -> Path:
+    _validate_repo(repo)
+    _validate_branch(branch)
     _run(["gh", "repo", "clone", repo, str(work_root)])
     _run(["git", "fetch", "origin", branch], cwd=work_root)
     _run(["git", "checkout", branch], cwd=work_root)
@@ -45,6 +66,14 @@ def build_options(cwd: Path) -> ClaudeAgentOptions:
         cwd=str(cwd),
         allowed_tools=["Bash", "Read", "Edit", "Write", "Grep", "Glob"],
         permission_mode="bypassPermissions",
+        # The checkout is untrusted branch content (this pass runs
+        # unsandboxed on the host — see SKILL.md's "Known gap"). Disable
+        # all filesystem settings sources so a hook committed in
+        # .claude/settings*.json on that branch can't auto-execute in
+        # this session; permission_mode/allowed_tools above are set
+        # explicitly in code, not sourced from settings, so nothing
+        # needed from disk here.
+        setting_sources=[],
     )
 
 
