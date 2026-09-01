@@ -1,0 +1,10 @@
+# Inference Routing (§3.4) — self-hosted LiteLLM proxy. Provider keys stay
+# on this proxy; the harness never holds an ANTHROPIC_API_KEY directly.
+model_list:
+  - model_name: claude-sonnet
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

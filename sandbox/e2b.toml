@@ -1,0 +1,8 @@
+# Execution Sandbox (§3.3). E2B has no self-host OSS tier — pilot volume
+# fits the free Hobby tier (100 sbx-hr/mo); upgrade to Pro if reliability
+# under load becomes an issue (see cost plan).
+template_id = "template-agent-sandbox"
+dockerfile = "Dockerfile"
+start_cmd = "python /app/agent.py"
+cpu_count = 1
+memory_mb = 1024

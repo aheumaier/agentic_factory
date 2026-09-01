@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.DS_Store
+*.tar.gz
+ENDGAME-Agentic-Platform-Landscape-2026-08-17.pdf
+markdown-lsp-0.1.3/

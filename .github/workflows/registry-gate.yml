@@ -1,0 +1,23 @@
+name: registry-gate
+
+# Deployment/Lifecycle enforcement (§3.7): no agent reaches Deploy without a
+# registry entry. Runs on any change touching registry/ or an agent's spec.
+on:
+  pull_request:
+    paths:
+      - "registry/**"
+      - "spec/**"
+
+jobs:
+  check-registry-entry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify every changed agent has a manifest + latest version file
+        run: |
+          set -euo pipefail
+          for dir in registry/agents/*/; do
+            name="$(basename "$dir")"
+            test -f "$dir/manifest.yaml" || { echo "missing manifest.yaml for $name"; exit 1; }
+            test -n "$(ls -A "$dir/versions" 2>/dev/null)" || { echo "no versions recorded for $name"; exit 1; }
+          done
