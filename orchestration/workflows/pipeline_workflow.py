@@ -13,7 +13,13 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from activities import run_swe_agent_activity
+# activities.py loads harness/swe-agent/agent.py via importlib at module
+# import time (Path.resolve(), exec_module) — real filesystem/non-
+# deterministic work the workflow sandbox otherwise refuses to run
+# during workflow validation. It's never executed as workflow code
+# (only referenced by name for execute_activity), so pass it through.
+with workflow.unsafe.imports_passed_through():
+    from activities import run_swe_agent_activity
 
 
 @workflow.defn
