@@ -1,0 +1,12 @@
+[project]
+name = "agentic-factory"
+version = "0.1.0"
+description = "Repo-root test/dev tooling for the agent factory pipeline (not a package to be installed/published)."
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pyyaml",
+]

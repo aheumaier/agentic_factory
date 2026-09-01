@@ -17,8 +17,8 @@ description: "Task list for: Agent spec schema/template regression test"
 
 **Purpose**: Make `pytest tests/test_agent_spec_schema.py` runnable — repo has no root-level Python project yet.
 
-- [ ] T001 Create `pyproject.toml` at repo root declaring `pytest` and `pyyaml` as dependencies (per research.md's "Dependency declaration location" decision) — must not touch `harness/template-agent/pyproject.toml`
-- [ ] T002 [P] Create `tests/` directory at repo root (if it doesn't already exist)
+- [X] T001 Create `pyproject.toml` at repo root declaring `pytest` and `pyyaml` as dependencies (per research.md's "Dependency declaration location" decision) — must not touch `harness/template-agent/pyproject.toml`
+- [X] T002 [P] Create `tests/` directory at repo root (if it doesn't already exist)
 
 **Checkpoint**: `uv sync` (or equivalent) succeeds and an empty `pytest` run discovers the `tests/` dir with no errors.
 
@@ -32,14 +32,14 @@ description: "Task list for: Agent spec schema/template regression test"
 
 ### Implementation for User Story 1
 
-- [ ] T003 [US1] Write `tests/test_agent_spec_schema.py` in `tests/test_agent_spec_schema.py`:
+- [X] T003 [US1] Write `tests/test_agent_spec_schema.py` in `tests/test_agent_spec_schema.py`:
   - Load `spec/schema/agent-spec.schema.json` via `json.load`; read its top-level `required` array.
   - Read `spec/templates/agent-spec.template.md`, split on `---` to extract the frontmatter block, parse it with `yaml.safe_load`.
   - Compute `missing = [k for k in schema["required"] if k not in frontmatter]`.
   - `assert not missing, f"Template frontmatter is missing schema-required key(s): {missing}"` (or equivalent itemized message) — satisfies spec FR-003/FR-005.
   - Do **not** call any JSON-Schema validator against the frontmatter's values — satisfies spec FR-004.
-- [ ] T004 [US1] Run `pytest tests/test_agent_spec_schema.py -v` and confirm it passes against the current schema/template pair (depends on T001, T002, T003)
-- [ ] T005 [US1] Manually verify the failure path per quickstart.md's "Validating the failure path" section: temporarily remove a required key from the template's frontmatter, rerun, confirm the itemized failure names that key, then revert with `git checkout -- spec/templates/agent-spec.template.md` (depends on T004)
+- [X] T004 [US1] Run `pytest tests/test_agent_spec_schema.py -v` and confirm it passes against the current schema/template pair (depends on T001, T002, T003)
+- [X] T005 [US1] Manually verify the failure path per quickstart.md's "Validating the failure path" section: temporarily remove a required key from the template's frontmatter, rerun, confirm the itemized failure names that key, then revert with `git checkout -- spec/templates/agent-spec.template.md` (depends on T004)
 
 **Checkpoint**: User Story 1 fully functional — this is the entire feature (single-story MVP).
 
@@ -47,7 +47,7 @@ description: "Task list for: Agent spec schema/template regression test"
 
 ## Phase 3: Polish & Cross-Cutting Concerns
 
-- [ ] T006 Run quickstart.md's "Run" section verbatim as a final sanity check (depends on T005)
+- [X] T006 Run quickstart.md's "Run" section verbatim as a final sanity check (depends on T005)
 
 ---
 
