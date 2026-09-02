@@ -9,7 +9,15 @@ import re
 import subprocess
 from pathlib import Path
 
+import braintrust
 from claude_agent_sdk import ClaudeAgentOptions, query
+
+# Observability (§3.8): same project as eval/braintrust/eval.config.py, so a
+# run's trace and its Eval-Gate score land side by side.
+BRAINTRUST_PROJECT = os.environ.get("BRAINTRUST_PROJECT", "agent-factory-pilot")
+
+logger = braintrust.init_logger(project=BRAINTRUST_PROJECT)
+braintrust.auto_instrument()
 
 IMPLEMENT_PROMPT = """/speckit-implement
 
@@ -20,6 +28,13 @@ fully pass, in which case say why in the commit message; a human \
 reviews the result either way. When you are done, STOP: do not run \
 `git push` and do not open a pull request. A separate step outside \
 this conversation handles pushing and opening the PR."""
+
+FEEDBACK_PROMPT_SUFFIX = """
+
+The previous attempt on this branch failed the Eval-Gate. Feedback:
+{feedback}
+
+Address this feedback before re-running verification and committing."""
 
 # repo/branch are workflow inputs (ultimately caller-supplied) threaded
 # straight into git/gh argv. Reject anything not shaped like a plain
@@ -128,9 +143,12 @@ def build_options(cwd: Path) -> ClaudeAgentOptions:
     )
 
 
-async def run_implement(checkout: Path) -> str:
+async def run_implement(checkout: Path, feedback: str | None = None) -> str:
+    prompt = IMPLEMENT_PROMPT
+    if feedback:
+        prompt += FEEDBACK_PROMPT_SUFFIX.format(feedback=feedback)
     transcript: list[str] = []
-    async for message in query(prompt=IMPLEMENT_PROMPT, options=build_options(checkout)):
+    async for message in query(prompt=prompt, options=build_options(checkout)):
         transcript.append(str(message))
     return "\n".join(transcript)
 
@@ -200,11 +218,11 @@ def verify_pr_exists(repo: str, branch: str) -> str:
     return urls[0]
 
 
-async def run(repo: str, branch: str, work_root: Path) -> str:
+async def run(repo: str, branch: str, work_root: Path, feedback: str | None = None) -> str:
     checkout = clone_and_checkout(repo, branch, work_root)
     verify_spec_exists(checkout)
     sha_before = _head_sha(checkout)
-    await run_implement(checkout)
+    await run_implement(checkout, feedback)
     verify_left_main(checkout, branch)
     verify_new_commit(checkout, sha_before)
     title = f"Implement {branch}"
@@ -219,8 +237,10 @@ if __name__ == "__main__":
 
     async def _main() -> None:
         repo, branch = sys.argv[1], sys.argv[2]
+        feedback = sys.argv[3] if len(sys.argv) > 3 else None
         with tempfile.TemporaryDirectory() as td:
-            pr_url = await run(repo, branch, Path(td))
+            pr_url = await run(repo, branch, Path(td), feedback)
             print(pr_url)
 
     asyncio.run(_main())
+    logger.flush()

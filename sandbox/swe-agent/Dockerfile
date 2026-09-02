@@ -14,9 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# Mirrors the single dependency in harness/swe-agent/pyproject.toml; the
-# project isn't pip-installable (no build-system), so it's named directly.
-RUN pip install --no-cache-dir claude-agent-sdk
+# Mirrors the dependencies in harness/swe-agent/pyproject.toml; the project
+# isn't pip-installable (no build-system), so they're named directly.
+RUN pip install --no-cache-dir "braintrust>=0.36.0" claude-agent-sdk
 
 COPY harness/swe-agent/agent.py ./agent.py
 

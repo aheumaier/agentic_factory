@@ -24,11 +24,14 @@ flowchart TB
     targetrepo["<<System>>\nTarget repositories\n(the codebases being built/fixed)"]:::ext
 
     author -->|"assigns issue / raises spec"| github
-    github -->|"trigger: issue assigned,\nfailing CI, or webhook"| core
+    author -->|"comments\n@swe-agent build\non a PR"| github
+    github -->|"actual: PR-comment trigger\n(reusable GH Actions workflow)"| core
+    github -.->|"designed: issue assigned,\nfailing CI, or webhook"| core
     core -->|"clone, branch, commit,\npush, open PR"| targetrepo
     core -->|"model inference\n(direct today — see container view)"| anthropic
-    core -.->|"designed: sandbox test\n(not yet invoked)"| e2b
-    core -.->|"designed: eval gate\n(not yet invoked)"| braintrust
+    core -->|"actual: sandbox test,\nGH-comment path only"| e2b
+    core -->|"actual: trace emit\n(braintrust.auto_instrument)"| braintrust
+    core -.->|"designed: eval gate\n(scoring code still\nNotImplementedError)"| braintrust
     reviewer -->|"reviews, approves, merges\n(outside factory's control)"| targetrepo
     github -->|"review/CI status"| reviewer
 
@@ -38,6 +41,12 @@ flowchart TB
 ```
 
 **Reading this diagram:**
-- Solid edges are live today. Dashed edges (`core -.-> e2b`, `core -.-> braintrust`) are designed integrations with no calling code yet — see `00-status.md`.
+- Solid edges are live today. `core --> e2b` is real but conditional — it
+  only fires for the GitHub-comment trigger path, not the Temporal one
+  (see `00-status.md`). `core --> braintrust` (trace emit) is unconditional
+  today, since it's an import-time call in `agent.py`; the dashed
+  `core -.-> braintrust` (eval gate) edge is the still-unimplemented
+  scoring path — same external system, two different integrations, only
+  one of which is real.
 - `targetrepo` (the codebase the factory builds/fixes) is drawn as external to the factory itself — it's the factory's actual work product, not part of it.
 - The Human Reviewer is a first-class actor, not an edge case: per `agent-swe-design.md` §5/§6, the workflow's terminal state is always "awaiting human," never "merged" — the factory has no path that reaches `targetrepo`'s default branch without this actor.

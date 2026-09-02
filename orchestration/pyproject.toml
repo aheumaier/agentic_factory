@@ -1,0 +1,10 @@
+[project]
+name = "orchestration"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "braintrust>=0.36.0",  # imported by eval.config.py, which activities.py loads (§3.6)
+    "e2b",                 # Execution Sandbox the SWE-agent activity runs in (§3.3)
+    "pyyaml",              # registry manifest/version files the Register activity writes (§3.7)
+    "temporalio",
+]

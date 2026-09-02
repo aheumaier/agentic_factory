@@ -8,6 +8,17 @@ of the **actual code path**, traced directly from
 `harness/swe-agent/agent.py`, `orchestration/activities.py`, and
 `orchestration/workflows/pipeline_workflow.py`.
 
+There are now **two trigger paths** into the same `agent.py:run()`; they
+diverge only in who calls it and how `clone_and_checkout()` authenticates.
+This diagram traces the original, Temporal-triggered path (host tempdir,
+ambient `gh` session). See
+[`20-c4-container.md`](./20-c4-container.md) for how the second path — a
+PR comment (`@swe-agent build`) driving
+`.github/workflows/swe-agent-build.yml`, which mints a GitHub App token and
+runs the same `run()` inside an E2B sandbox with `GH_TOKEN` set instead —
+fits into the container view; the only code-level difference is that
+`clone_and_checkout()` embeds `GH_TOKEN` into the clone URL when present.
+
 ```mermaid
 sequenceDiagram
     participant T as Temporal Activity
@@ -16,9 +27,11 @@ sequenceDiagram
     participant S as Claude Agent SDK
     participant AI as Anthropic API
     participant H as GitHub (gh CLI)
+    participant B as Braintrust
 
+    Note over A: braintrust.init_logger() +\nauto_instrument() at import time
     T->>A: run(repo, branch, work_root)
-    A->>G: clone https://github.com/{repo}.git
+    A->>G: clone https://github.com/{repo}.git\n(+ GH_TOKEN cred if set)
     A->>G: fetch origin {branch}, then checkout {branch}
     A->>A: verify_spec_exists()\n(glob specs/*/tasks.md)
     A->>G: rev-parse HEAD  (sha_before)
@@ -32,7 +45,14 @@ sequenceDiagram
     A->>H: gh pr create --repo --head --title --body-file
     A->>H: gh pr list --json url  (verify_pr_exists)
     A-->>T: return PR URL
+    A-->>B: traces (auto-instrumented,\nasync of the above)
 ```
+
+The `Note over A` and `A-->>B` additions are the only changes from the
+pre-Braintrust-wizard version of this diagram: tracing wraps the whole
+module, not a step in the sequence above, and doesn't block or alter any
+of it — `run_eval`/`load_success_criteria` (the actual gate) are still not
+called from anywhere in this path.
 
 ## What's missing vs. the designed workflow
 

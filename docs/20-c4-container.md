@@ -55,38 +55,48 @@ directly").
 flowchart LR
     subgraph factory["Agent Factory — as built"]
         direction LR
-        spec["Spec/Intake"]:::partial
+        spec["Spec/Intake"]:::empty
         harnessT["Harness: template-agent"]:::stub
         harnessS["Harness: swe-agent"]:::real
-        sandbox["Execution Sandbox"]:::stub
+        ghTrigger["GH Actions:\nswe-agent-build.yml\n(reusable workflow)"]:::real
+        sandbox["Execution Sandbox\n(E2B)"]:::partial
         litellm["Inference Routing\n(LiteLLM proxy)"]:::partial
         orch["Orchestration\n(Build step only)"]:::partial
-        evalgate["Eval/Gating"]:::stub
+        evalgate["Eval/Gating\n(tracing real,\ngate still stub)"]:::partial
         registry["Deployment/Lifecycle\n(CI gate real,\nno auto-registration)"]:::partial
         obs["Observability"]:::partial
     end
     anthropic["<<System>>\nAnthropic API"]
     github["<<System>>\nGitHub"]
+    braintrust["<<System>>\nBraintrust"]
 
-    spec -.->|"manual today"| harnessS
-    orch -->|"run_swe_agent_activity"| harnessS
+    spec -.->|"manual today\n(spec/ dir gone;\nSpec Kit specs/\nunaffected)"| harnessS
+    orch -->|"run_swe_agent_activity\n(host tempdir, no sandbox)"| harnessS
+    github -->|"PR comment\n@swe-agent build"| ghTrigger
+    ghTrigger -->|"App token,\ncreate/exec/kill"| sandbox
+    sandbox -->|"runs agent.py\n(GH_TOKEN auth)"| harnessS
     harnessS -.->|"designed path\n(not used)"| litellm
     litellm -.->|"designed path\n(not used)"| anthropic
     harnessS -->|"actual: direct SDK call"| anthropic
     harnessS -->|"clone/push/PR"| github
-    harnessS -.->|"never invoked"| sandbox
-    harnessS -.->|"never invoked"| evalgate
-    evalgate -.->|"stub: no scoring code"| registry
+    harnessS -->|"trace emit:\ninit_logger +\nauto_instrument"| evalgate
+    evalgate --> braintrust
+    evalgate -.->|"gate scoring:\nstill NotImplementedError"| registry
     registry -.->|"no traces emitted"| obs
-    harnessT -.->|"builds into\nsandbox/Dockerfile,\nnever run"| sandbox
+    harnessT -.->|"trace emit only;\nno tool bindings"| evalgate
 
     classDef real fill:#1a7f37,stroke:#1a7f37,color:#fff
     classDef partial fill:#9a6700,stroke:#9a6700,color:#fff,stroke-dasharray: 4 3
     classDef stub fill:#6e7781,stroke:#6e7781,color:#fff,stroke-dasharray: 2 2
+    classDef empty fill:#3d3d3d,stroke:#3d3d3d,color:#fff,stroke-dasharray: 1 4
 ```
 
-**Reading this diagram:** the only solid, unconditional edges in the "as
-built" view are `orch → harnessS`, `harnessS → anthropic` (direct), and
-`harnessS → github`. Everything else is either manual, unused, or
-one-directional-and-incomplete. See [`00-status.md`](./00-status.md) for
-the file-level evidence behind each status color.
+**Reading this diagram:** the solid, unconditional edges are
+`orch → harnessS`, `harnessS → anthropic` (direct), `harnessS → github`,
+and `harnessS → evalgate` (tracing only). `github → ghTrigger → sandbox →
+harnessS` is solid but *conditional* — it only fires for a PR-comment
+trigger, not the Temporal one. Everything else is either manual, unused,
+or one-directional-and-incomplete. `evalgate` is now split in meaning:
+the Braintrust *tracing* edge is real, the gate-scoring edge into
+`registry` is not. See [`00-status.md`](./00-status.md) for the
+file-level evidence behind each status color.

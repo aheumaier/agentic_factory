@@ -52,8 +52,10 @@ idiom the two root docs already use (their §2 and §5 diagrams), and renders
 reliably on GitHub, in editor Markdown previews, and in Mermaid Live, where
 native C4 diagram support is inconsistent.
 
-**Known documentation discrepancy:** `CLAUDE.md` describes
-`markdown-lsp-0.1.3/` as a vendored, third-party plugin directory unrelated
-to this pipeline. That directory does not exist in this checkout — flagged
-here as a fact-check finding, not corrected, since fixing CLAUDE.md is
-outside this documentation task's scope.
+**Note on staleness:** this directory is a snapshot, re-verified against
+source at each documentation pass — not on every commit. As of the pass
+that added the GitHub-comment trigger (`.github/workflows/swe-agent-build.yml`)
+and the Braintrust setup wizard's tracing calls, both are reflected
+throughout; see `00-status.md`'s cross-cutting facts and
+`60-best-practices.md` §3 for the fastest way to check what might already
+be stale again.

@@ -9,6 +9,10 @@ Each item below is what should be true before that layer's status in
 [`00-status.md`](./00-status.md) can move from stub/partial to real.
 
 **Spec/Intake (§3.1)**
+- [ ] `spec/` (schema, template, `triage-policy.md`) needs to exist again
+      before any of the below can be built — the directory was deleted
+      from the working tree before this documentation pass; restore or
+      rewrite it first.
 - [ ] A triage engine reads `spec/triage-policy.md`'s auto-approve/escalate/
       reject rules and evaluates them against a submitted spec — today a
       human applies these rules by eye.
@@ -26,13 +30,21 @@ Each item below is what should be true before that layer's status in
       for exactly what's missing).
 
 **Execution Sandbox (§3.3)**
-- [ ] `swe-agent`'s clone/implement/verify/commit sequence runs inside the
-      E2B container defined by `sandbox/e2b.toml`, not a host tempdir —
-      and that container is built from `harness/swe-agent`, not
-      `harness/template-agent` (fix the `Dockerfile`'s `COPY` targets).
-- [ ] The same argument-injection guards `agent.py`'s `_validate_repo`/
+- [x] `swe-agent`'s clone/implement/verify/commit sequence runs inside the
+      E2B container defined by `sandbox/swe-agent/e2b.toml`, built from
+      `harness/swe-agent` — done, but **only for the GitHub-comment
+      trigger** (`.github/workflows/swe-agent-build.yml`). The
+      Temporal-triggered path still runs in a host tempdir.
+- [x] The same argument-injection guards `agent.py`'s `_validate_repo`/
       `_validate_branch` already apply survive the move into a sandboxed
-      entrypoint.
+      entrypoint — unchanged code path, same guards.
+- [ ] `sandbox/swe-agent/Dockerfile` needs `pip install braintrust` added
+      — `agent.py` now imports it unconditionally at module load, but the
+      image only installs `claude-agent-sdk`; a GH-triggered run will
+      `ImportError` until this is fixed and the image rebuilt.
+- [ ] Wire the Temporal-triggered path into the same E2B sandbox (or
+      retire that path) so "sandboxed" isn't conditional on which trigger
+      fired.
 
 **Inference Routing (§3.4)**
 - [ ] `swe-agent` (and any future harness) calls the LiteLLM proxy
@@ -52,6 +64,15 @@ Each item below is what should be true before that layer's status in
       choice).
 
 **Eval/Gating (§3.6)**
+- [x] Braintrust tracing is live — `harness/swe-agent/agent.py` and
+      `harness/template-agent/agent.py` both call
+      `braintrust.init_logger()` + `auto_instrument()` at import time
+      (added by the Braintrust setup wizard). This is tracing, not
+      gating — nothing downstream reads these traces yet.
+- [ ] Reconcile the project name: tracing goes to `"My Project"` (wizard
+      default); `eval.config.py`'s `PROJECT` constant is
+      `"agent-factory-pilot"`. Pick one and update the other, or the two
+      halves of this layer will keep looking at different data.
 - [ ] Implement `load_success_criteria` (parse `success_criteria` from a
       spec) and `run_eval` (score a sandbox trace, raise on regression) in
       `eval/braintrust/eval.config.py` — until both exist,
@@ -69,8 +90,10 @@ Each item below is what should be true before that layer's status in
 
 **Observability (§3.8)**
 - [ ] Emit traces from `swe-agent`'s tool calls and model calls to Langfuse
-      — the infra (`docker-compose.yml`'s langfuse/postgres/clickhouse
-      services) is already running with nothing feeding it.
+      specifically — the infra (`docker-compose.yml`'s
+      langfuse/postgres/clickhouse services) is already running with
+      nothing feeding it. The new Braintrust tracing (see Eval/Gating
+      above) is a separate service and doesn't satisfy this item.
 
 ## 2. Cross-cutting conventions already established — replicate these
 
@@ -102,10 +125,25 @@ Each item below is what should be true before that layer's status in
   meaningful should not be built until `eval/braintrust/eval.config.py` is
   implemented.
 - **`swe-agent` runs unsandboxed, with `bypassPermissions` and full `Bash`
-  access, in a host tempdir.** This is a documented, accepted gap in its
-  own `SKILL.md` — not a hidden one — but it means every run should be
-  treated as supervised, not autonomous, exactly as the registry manifest's
-  `requires_human_supervision: true` states.
+  access, in a host tempdir — but only via the Temporal trigger.** The
+  GitHub-comment trigger now runs it inside an E2B sandbox instead. Both
+  paths are still documented as supervised, not autonomous, per
+  `SKILL.md` and the registry manifest's `requires_human_supervision:
+  true`.
+- **The E2B sandbox image is missing a dependency it now needs.**
+  `sandbox/swe-agent/Dockerfile` installs `claude-agent-sdk` but not
+  `braintrust`, which `agent.py` now imports unconditionally — a
+  GitHub-comment-triggered run will fail at import time until the image
+  is rebuilt with that dependency added.
+- **Braintrust tracing and the Braintrust eval gate point at two
+  different projects.** `agent.py`'s `init_logger(project="My Project")`
+  vs. `eval.config.py`'s `PROJECT = "agent-factory-pilot"` — nobody has
+  reconciled these, so today's traces aren't even in the project the gate
+  script would look at once it's implemented.
+- **`spec/` no longer exists.** Schema, template, and `triage-policy.md`
+  were deleted from the working tree before this documentation pass, for
+  reasons outside this pass's scope; `tests/test_agent_spec_schema.py`
+  fails unconditionally as a result and hasn't been fixed or removed.
 - **LiteLLM is fully configured and unused.** Low-effort, high-value fix
   (see Inference Routing checklist above) — the proxy side of this
   integration is already done; only the harness-side call needs to change.
