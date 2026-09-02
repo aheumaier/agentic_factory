@@ -29,9 +29,8 @@ flowchart TB
     github -.->|"designed: issue assigned,\nfailing CI, or webhook"| core
     core -->|"clone, branch, commit,\npush, open PR"| targetrepo
     core -->|"model inference\n(direct today — see container view)"| anthropic
-    core -->|"actual: sandbox test,\nGH-comment path only"| e2b
-    core -->|"actual: trace emit\n(braintrust.auto_instrument)"| braintrust
-    core -.->|"designed: eval gate\n(scoring code still\nNotImplementedError)"| braintrust
+    core -->|"actual: sandbox test,\nboth trigger paths"| e2b
+    core -->|"actual: trace emit\n(braintrust.auto_instrument)\n+ v1 coverage eval gate"| braintrust
     reviewer -->|"reviews, approves, merges\n(outside factory's control)"| targetrepo
     github -->|"review/CI status"| reviewer
 
@@ -41,12 +40,14 @@ flowchart TB
 ```
 
 **Reading this diagram:**
-- Solid edges are live today. `core --> e2b` is real but conditional — it
-  only fires for the GitHub-comment trigger path, not the Temporal one
-  (see `00-status.md`). `core --> braintrust` (trace emit) is unconditional
-  today, since it's an import-time call in `agent.py`; the dashed
-  `core -.-> braintrust` (eval gate) edge is the still-unimplemented
-  scoring path — same external system, two different integrations, only
-  one of which is real.
+- Solid edges are live today. `core --> e2b` is now unconditional — both
+  the Temporal path (`run_swe_agent_activity`'s own `AsyncSandbox` call)
+  and the GitHub-comment path (`swe-agent-build.yml`'s `@e2b/cli` calls)
+  run inside it (see `00-status.md`). `core --> braintrust` now covers
+  both tracing (import-time `auto_instrument()`) and the real v1 binary
+  coverage gate (`eval_gate_activity` → `eval.config.py::run_eval`) — the
+  Temporal path's Eval-Gate step, not just passive tracing, and both now
+  target the same `BRAINTRUST_PROJECT`. This gate is only reachable from
+  the Temporal path; the GitHub-comment path stops after Build.
 - `targetrepo` (the codebase the factory builds/fixes) is drawn as external to the factory itself — it's the factory's actual work product, not part of it.
 - The Human Reviewer is a first-class actor, not an edge case: per `agent-swe-design.md` §5/§6, the workflow's terminal state is always "awaiting human," never "merged" — the factory has no path that reaches `targetrepo`'s default branch without this actor.

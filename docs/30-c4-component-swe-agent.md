@@ -4,14 +4,16 @@ The only container in this repo worth decomposing to component level —
 everything else is either an off-the-shelf service (Temporal, Langfuse) or
 a stub with no internal structure yet. This maps directly onto
 `harness/swe-agent/agent.py`'s functions, in the order `run()` actually
-calls them. The same code now runs in two different environments — a host
-tempdir (Temporal trigger) or an E2B sandbox (GitHub-comment trigger, see
+calls them. The same code now runs inside an E2B sandbox regardless of
+which trigger started it — Temporal's `run_swe_agent_activity` or the
+GitHub-comment path's `swe-agent-build.yml` (see
 [`20-c4-container.md`](./20-c4-container.md)) — this diagram is agnostic to
-which; only `clone_and_checkout()`'s auth path differs between them.
+which; only `clone_and_checkout()`'s auth path (`GH_TOKEN` source) differs
+between them.
 
 ```mermaid
 flowchart TB
-    subgraph process["swe-agent process — host tempdir or E2B sandbox"]
+    subgraph process["swe-agent process — always inside an E2B sandbox"]
         direction TB
         run["<<Component>>\nrun()\norchestrator"]:::real
         clone["<<Component>>\nclone_and_checkout()\n+ _validate_repo/_validate_branch\n+ GH_TOKEN auth + token scrub"]:::real
@@ -52,23 +54,27 @@ flowchart TB
   being parsed as a flag instead of a positional ref). Clones via an
   explicit `https://github.com/{repo}.git` URL rather than `gh repo clone`,
   because the latter defers to the host's `gh` `git_protocol` config, which
-  may be set to `ssh` with no working key. When a `GH_TOKEN` env var is
-  set (a GitHub App installation token, minted by
-  `.github/workflows/swe-agent-build.yml` for the sandboxed path — there's
-  no ambient credential helper inside an E2B sandbox), it's embedded as
-  `x-access-token:{token}@github.com`; unset, it falls back to the
-  unauthenticated URL, keeping the host-CLI path unchanged. On a failed
+  may be set to `ssh` with no working key. `agent.py` itself still treats
+  `GH_TOKEN` as optional (`os.environ.get`, falling back to an
+  unauthenticated URL) for a hypothetical direct host-CLI invocation, but
+  both real trigger paths now always supply it, since there's no ambient
+  `gh` credential helper inside an E2B sandbox: `run_swe_agent_activity`
+  requires it in the Temporal worker's own env (`os.environ["GH_TOKEN"]`,
+  no fallback there) and forwards it into the sandbox; `swe-agent-build.yml`
+  mints a fresh GitHub App installation token per run instead. When set,
+  it's embedded as `x-access-token:{token}@github.com`. On a failed
   clone, `_scrubbed()` rebuilds the `CalledProcessError` with the token
   redacted from `args`/`cmd`/`output`/`stderr` before re-raising (`from
   None`, so the unscrubbed original doesn't survive in the traceback
   chain) — otherwise the token could leak into a workflow log or the PR
   comment the caller posts back.
 - **`braintrust.init_logger()` / `auto_instrument()`** (module level, not
-  inside `run()`) were added by the Braintrust setup wizard, not this
-  design — they instrument the whole process for tracing, independent of
-  the `run()` call chain below. Note the project name is the wizard's
-  literal default, `"My Project"`, not the `"agent-factory-pilot"` project
-  `eval/braintrust/eval.config.py` targets — see `00-status.md`.
+  inside `run()`) were added by the Braintrust setup wizard, then pointed
+  at a shared `BRAINTRUST_PROJECT` env var (default `"agent-factory-pilot"`)
+  instead of the wizard's `"My Project"` literal — they instrument the
+  whole process for tracing, independent of the `run()` call chain below,
+  and now land in the same project `eval/braintrust/eval.config.py`'s gate
+  reads from — see `00-status.md`.
 - **`verify_spec_exists()`** hard-fails if no `specs/*/tasks.md` is on the
   checked-out branch — this is the code-level enforcement that Spec Intake
   (`/speckit-specify → plan → tasks`) already happened upstream, manually,

@@ -8,13 +8,16 @@ important facts in this repo right now.
 ## Diagram A — as designed (`agent-factory-architecture.md` §3.1–§3.8)
 
 All 8 layers, full intended data flow. This diagram shows *intent*, not
-status — every container is drawn solid, on purpose.
+status — every container is drawn solid, on purpose. The Spec/Intake box
+reflects the *current* design (Spec Kit) — the original bespoke
+schema/triage-policy design this box once meant is retired; see
+`00-status.md`.
 
 ```mermaid
 flowchart LR
     subgraph factory["Agent Factory"]
         direction LR
-        spec["<<Container>>\nSpec/Intake\n(spec/)"]
+        spec["<<Container>>\nSpec/Intake\n(Spec Kit: .specify/ + specs/)"]
         harness["<<Container>>\nHarness/Runtime\n(harness/)"]
         sandbox["<<Container>>\nExecution Sandbox\n(sandbox/, E2B)"]
         litellm["<<Container>>\nInference Routing\n(litellm/, LiteLLM proxy)"]
@@ -55,33 +58,36 @@ directly").
 flowchart LR
     subgraph factory["Agent Factory — as built"]
         direction LR
-        spec["Spec/Intake"]:::empty
+        spec["Spec/Intake\n(Spec Kit, official)"]:::real
         harnessT["Harness: template-agent"]:::stub
         harnessS["Harness: swe-agent"]:::real
-        ghTrigger["GH Actions:\nswe-agent-build.yml\n(reusable workflow)"]:::real
-        sandbox["Execution Sandbox\n(E2B)"]:::partial
+        ghTrigger["GH Actions:\nswe-agent-build.yml\n(reusable workflow,\nBuild-only, no Gate)"]:::partial
+        sandbox["Execution Sandbox\n(E2B)"]:::real
         litellm["Inference Routing\n(LiteLLM proxy)"]:::partial
-        orch["Orchestration\n(Build step only)"]:::partial
-        evalgate["Eval/Gating\n(tracing real,\ngate still stub)"]:::partial
-        registry["Deployment/Lifecycle\n(CI gate real,\nno auto-registration)"]:::partial
+        orch["Orchestration\n(Build->Gate loop,\nRegister; Deploy\ncode exists, unreachable)"]:::partial
+        evalgate["Eval/Gating\n(v1 coverage gate,\nreal; tracing real)"]:::real
+        registry["Deployment/Lifecycle\n(Register: real, automated;\nDeploy: unreachable)"]:::partial
         obs["Observability"]:::partial
     end
     anthropic["<<System>>\nAnthropic API"]
     github["<<System>>\nGitHub"]
     braintrust["<<System>>\nBraintrust"]
 
-    spec -.->|"manual today\n(spec/ dir gone;\nSpec Kit specs/\nunaffected)"| harnessS
-    orch -->|"run_swe_agent_activity\n(host tempdir, no sandbox)"| harnessS
+    spec -->|"human-authored via\n/speckit-specify -> plan -> tasks,\nverify_spec_exists() enforces it"| harnessS
+    orch -->|"run_swe_agent_activity"| sandbox
+    sandbox -->|"runs agent.py"| harnessS
     github -->|"PR comment\n@swe-agent build"| ghTrigger
-    ghTrigger -->|"App token,\ncreate/exec/kill"| sandbox
-    sandbox -->|"runs agent.py\n(GH_TOKEN auth)"| harnessS
+    ghTrigger -->|"App token,\ncreate/exec/kill\n(separate from orch)"| sandbox
     harnessS -.->|"designed path\n(not used)"| litellm
     litellm -.->|"designed path\n(not used)"| anthropic
     harnessS -->|"actual: direct SDK call"| anthropic
     harnessS -->|"clone/push/PR"| github
     harnessS -->|"trace emit:\ninit_logger +\nauto_instrument"| evalgate
+    orch -->|"eval_gate_activity\n(reads spec.md,\nreads sandbox result)"| evalgate
     evalgate --> braintrust
-    evalgate -.->|"gate scoring:\nstill NotImplementedError"| registry
+    evalgate -->|"pass: register_activity\nopens factory-repo PR"| registry
+    evalgate -.->|"fail: loop back to Build\n(max 3 attempts)"| orch
+    registry -.->|"promote_agent_activity exists;\nnothing starts/signals\nRegistryPromotionWaiterWorkflow"| orch
     registry -.->|"no traces emitted"| obs
     harnessT -.->|"trace emit only;\nno tool bindings"| evalgate
 
@@ -91,12 +97,16 @@ flowchart LR
     classDef empty fill:#3d3d3d,stroke:#3d3d3d,color:#fff,stroke-dasharray: 1 4
 ```
 
-**Reading this diagram:** the solid, unconditional edges are
-`orch → harnessS`, `harnessS → anthropic` (direct), `harnessS → github`,
-and `harnessS → evalgate` (tracing only). `github → ghTrigger → sandbox →
-harnessS` is solid but *conditional* — it only fires for a PR-comment
-trigger, not the Temporal one. Everything else is either manual, unused,
-or one-directional-and-incomplete. `evalgate` is now split in meaning:
-the Braintrust *tracing* edge is real, the gate-scoring edge into
-`registry` is not. See [`00-status.md`](./00-status.md) for the
-file-level evidence behind each status color.
+**Reading this diagram:** `orch → sandbox → harnessS` is the Temporal
+path — Build now always runs inside E2B, never a host tempdir. The
+GitHub-comment path (`github → ghTrigger → sandbox → harnessS`) is solid
+but *independent* — it drives the same E2B template via its own `@e2b/cli`
+calls, not through `orch`, and stops at Build with no Gate/Register/Deploy
+of its own. `evalgate` is real for the Temporal path only (coverage gate,
+same `BRAINTRUST_PROJECT` as tracing now — the earlier project-name split
+is fixed) and feeds `registry`'s Register step, which really does open a
+PR on pass. The `registry -.-> orch` edge marks the one genuine dead end:
+`promote_agent_activity` and `RegistryPromotionWaiterWorkflow` are written
+but nothing ever starts or signals the latter, so Deploy never executes.
+See [`00-status.md`](./00-status.md) for the file-level evidence behind
+each status color.

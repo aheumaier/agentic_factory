@@ -25,6 +25,7 @@ back to a `§N.M` section instead of re-explaining it.
 | 5 | [`40-sequence-swe-agent-runtime.md`](./40-sequence-swe-agent-runtime.md) | Runtime trace of a real `swe-agent` run, and what's missing vs. its own design doc. |
 | 6 | [`50-pipeline-flow-gap-analysis.md`](./50-pipeline-flow-gap-analysis.md) | The factory's own §2 process flow, status-colored end to end. |
 | 7 | [`60-best-practices.md`](./60-best-practices.md) | Per-layer "definition of done" checklists, conventions to replicate, open risks. |
+| 8 | [`70-multi-agent-pipeline-design.md`](./70-multi-agent-pipeline-design.md) | **Design proposal, not built.** Extends `AgentPipelineWorkflow` into a full multi-stage SDLC pipeline — PM review, architect judge-panel, quality gate, automated/security review, human approval gates. |
 
 No C4 **Level 4 (Code)** page — out of scope at this codebase's current
 size; the one container worth decomposing that far (`swe-agent`) is fully
@@ -54,8 +55,10 @@ native C4 diagram support is inconsistent.
 
 **Note on staleness:** this directory is a snapshot, re-verified against
 source at each documentation pass — not on every commit. As of the pass
-that added the GitHub-comment trigger (`.github/workflows/swe-agent-build.yml`)
-and the Braintrust setup wizard's tracing calls, both are reflected
-throughout; see `00-status.md`'s cross-cutting facts and
-`60-best-practices.md` §3 for the fastest way to check what might already
-be stale again.
+that wired the real Temporal Build→Gate→Register loop and the
+`RegistryPromotionWaiterWorkflow` (commit `52e5366`), all pages reflect it;
+see `00-status.md`'s cross-cutting facts and `60-best-practices.md` §3 for
+the fastest way to check what might already be stale again — Deploy
+(`promote_agent_activity`) being unreachable and the GitHub-comment
+trigger path having no Gate/Register/Deploy step are the two facts most
+likely to change next.

@@ -8,17 +8,16 @@ the design docs' §-numbering so this stays navigable as the codebase grows.
 Each item below is what should be true before that layer's status in
 [`00-status.md`](./00-status.md) can move from stub/partial to real.
 
-**Spec/Intake (§3.1)**
-- [ ] `spec/` (schema, template, `triage-policy.md`) needs to exist again
-      before any of the below can be built — the directory was deleted
-      from the working tree before this documentation pass; restore or
-      rewrite it first.
-- [ ] A triage engine reads `spec/triage-policy.md`'s auto-approve/escalate/
-      reject rules and evaluates them against a submitted spec — today a
-      human applies these rules by eye.
-- [ ] Escalation actually routes through a touchpoint (Slack/Teams +
-      HumanLayer/gotoHuman per §3.1) instead of stopping at "not implemented
-      in this scaffold yet."
+**Spec/Intake (§3.1 — superseded)**
+- [x] Fulfilled by GitHub Spec Kit (`.specify/` + `specs/NNN-slug/`), the
+      official and only supported intake flow, enforced at runtime by
+      `swe-agent`'s `verify_spec_exists()`. The original §3.1 design
+      (bespoke `spec/` schema + `triage-policy.md`, Composio/Nango
+      transport, Slack/Teams + HumanLayer/gotoHuman escalation) is
+      retired — do not rebuild it.
+- [ ] Only remaining action item: delete `tests/test_agent_spec_schema.py`,
+      which still tests the deleted `spec/` schema and fails
+      unconditionally.
 
 **Harness/Runtime (§3.2)**
 - [ ] `template-agent/agent.py` gets real tool bindings and a real system
@@ -32,19 +31,24 @@ Each item below is what should be true before that layer's status in
 **Execution Sandbox (§3.3)**
 - [x] `swe-agent`'s clone/implement/verify/commit sequence runs inside the
       E2B container defined by `sandbox/swe-agent/e2b.toml`, built from
-      `harness/swe-agent` — done, but **only for the GitHub-comment
-      trigger** (`.github/workflows/swe-agent-build.yml`). The
-      Temporal-triggered path still runs in a host tempdir.
+      `harness/swe-agent` — done for **both** trigger paths now: the
+      GitHub-comment trigger (`.github/workflows/swe-agent-build.yml`, via
+      `@e2b/cli`) and the Temporal trigger (`run_swe_agent_activity`, via
+      the `e2b` Python SDK's `AsyncSandbox`). No host-tempdir path remains.
 - [x] The same argument-injection guards `agent.py`'s `_validate_repo`/
       `_validate_branch` already apply survive the move into a sandboxed
-      entrypoint — unchanged code path, same guards.
-- [ ] `sandbox/swe-agent/Dockerfile` needs `pip install braintrust` added
-      — `agent.py` now imports it unconditionally at module load, but the
-      image only installs `claude-agent-sdk`; a GH-triggered run will
-      `ImportError` until this is fixed and the image rebuilt.
-- [ ] Wire the Temporal-triggered path into the same E2B sandbox (or
-      retire that path) so "sandboxed" isn't conditional on which trigger
-      fired.
+      entrypoint — unchanged code path, same guards. `orchestration/activities.py`
+      additionally re-validates `repo`/`branch` itself before they reach a
+      `shlex.join`-built sandbox command.
+- [x] `sandbox/swe-agent/Dockerfile` now `pip install`s `braintrust>=0.36.0`
+      alongside `claude-agent-sdk` — the earlier `ImportError` gap is
+      fixed.
+- [ ] Reconcile the two independent invocation mechanisms — the Temporal
+      path (`orchestration/activities.py`, Python `e2b` SDK) and the
+      GitHub-comment path (`swe-agent-build.yml`, `@e2b/cli` shelled out
+      from bash) — into one, or document why both need to exist
+      long-term. Today a change to sandbox lifecycle handling (timeouts,
+      env vars passed in) has to be made in two places.
 
 **Inference Routing (§3.4)**
 - [ ] `swe-agent` (and any future harness) calls the LiteLLM proxy
@@ -55,36 +59,63 @@ Each item below is what should be true before that layer's status in
       specifically because the proxy side is already done.
 
 **Orchestration (§3.5)**
-- [ ] Add activities for Sandbox Test, Eval/Gate, and Deploy to
-      `orchestration/activities.py`, and wire them into
-      `pipeline_workflow.py` in the order `agent-factory-architecture.md`
-      §2 specifies, including the Eval/Gate-fail-routes-to-Build loop.
-- [ ] Decide and document a real retry policy per step (today's
-      `maximum_attempts=1` on Build is a placeholder, not a considered
-      choice).
+- [x] Sandbox Test is collapsed into the Build activity (`run_swe_agent_activity`);
+      Eval/Gate (`eval_gate_activity`) and Register (`register_activity`)
+      are real activities wired into `pipeline_workflow.py`'s
+      `AgentPipelineWorkflow`, in the order §2 specifies, including the
+      Eval/Gate-fail-routes-to-Build loop (`MAX_BUILD_ATTEMPTS=3`, gate
+      `reason` fed back as `feedback`).
+- [x] A real, considered retry policy exists per step: `_NO_AUTO_RETRY`
+      (`maximum_attempts=1`) on the two side-effecting activities
+      (Build, Register — pushing a branch/opening a PR isn't idempotent
+      enough for Temporal's own retries), `_TRANSIENT_RETRY` (backoff,
+      up to 4 attempts) on the read-only Eval-Gate activity.
+- [ ] **Deploy is unreachable.** `promote_agent_activity` and
+      `RegistryPromotionWaiterWorkflow` are written and registered on the
+      worker, but nothing ever calls `client.start_workflow(RegistryPromotionWaiterWorkflow, ...)`
+      or `handle.signal("pr_merged")` — no GH Actions step watches the
+      registry PR's merge event and fires the signal. Add that step (e.g.
+      a `pull_request` `closed`+`merged==true` workflow filtered to
+      `registry/promote-*` branches) before Deploy can be called "wired."
+- [ ] Reconcile the GitHub-comment trigger path
+      (`.github/workflows/swe-agent-build.yml`) with this workflow — today
+      it's a fully separate Build-only path with no Gate/Register/Deploy,
+      so a build triggered by a PR comment never reaches the registry at
+      all.
 
 **Eval/Gating (§3.6)**
 - [x] Braintrust tracing is live — `harness/swe-agent/agent.py` and
       `harness/template-agent/agent.py` both call
       `braintrust.init_logger()` + `auto_instrument()` at import time
-      (added by the Braintrust setup wizard). This is tracing, not
-      gating — nothing downstream reads these traces yet.
-- [ ] Reconcile the project name: tracing goes to `"My Project"` (wizard
-      default); `eval.config.py`'s `PROJECT` constant is
-      `"agent-factory-pilot"`. Pick one and update the other, or the two
-      halves of this layer will keep looking at different data.
-- [ ] Implement `load_success_criteria` (parse `success_criteria` from a
-      spec) and `run_eval` (score a sandbox trace, raise on regression) in
-      `eval/braintrust/eval.config.py` — until both exist,
-      `eval_gate_passed` in any manifest is a hardcoded default, never a
-      scored result (see [`00-status.md`](./00-status.md)).
+      (added by the Braintrust setup wizard).
+- [x] Project name reconciled: both `agent.py` files and
+      `eval.config.py` now read the same `BRAINTRUST_PROJECT` env var
+      (default `"agent-factory-pilot"`) instead of the wizard's `"My
+      Project"` literal.
+- [x] `load_success_criteria` and `run_eval` are implemented in
+      `eval/braintrust/eval.config.py` as a **v1 binary coverage gate** —
+      parses `SC-NNN` bullets from `spec.md`, passes iff the sandbox
+      exited 0, a PR exists, and at least one criterion was found.
+- [ ] This is coverage, not semantic scoring — no per-criterion LLM judge
+      or labeled dataset exists yet, so `run_eval` can't tell whether a
+      criterion's *content* was actually satisfied. That's the real next
+      step for this layer, not project reconciliation (done) or
+      `NotImplementedError` removal (done).
 - [ ] Wire Braintrust traces to Langfuse per `gate-policy.md`'s "on fail"
       section, so a rejected candidate carries an actionable trace back to
-      Build, not a bare fail signal.
+      Build, not just the plain-text `reason` string currently passed as
+      `feedback`.
 
 **Deployment/Lifecycle (§3.7)**
-- [ ] Automate registry entry creation/update on a passing Eval/Gate,
-      rather than hand-writing `manifest.yaml`/`versions/vN.yaml`.
+- [x] Registry entry creation/update on a passing Eval/Gate is automated:
+      `register_activity` opens a PR against this repo writing
+      `manifest.yaml`/`versions/vN.yaml` from the real gate result,
+      instead of a human hand-writing them.
+- [ ] Wire the actual Deploy trigger — `promote_agent_activity` and
+      `RegistryPromotionWaiterWorkflow` exist but nothing starts the
+      workflow or signals `pr_merged` on registry-PR merge (see
+      Orchestration checklist above). Until that exists, `status: active`
+      never happens automatically.
 - [ ] Add a rollback/retire path — `registry-gate.yml` only checks shape on
       PR, it doesn't manage the lifecycle after merge.
 
@@ -119,34 +150,35 @@ Each item below is what should be true before that layer's status in
 
 ## 3. Open gaps / risks (carried forward from `00-status.md`, stated plainly)
 
-- **`eval_gate_passed: false` reads as a quality signal but isn't one.**
-  Nothing in this repo can currently produce `true` for that field. Any
-  dashboard, report, or downstream automation that treats this field as
-  meaningful should not be built until `eval/braintrust/eval.config.py` is
-  implemented.
-- **`swe-agent` runs unsandboxed, with `bypassPermissions` and full `Bash`
-  access, in a host tempdir — but only via the Temporal trigger.** The
-  GitHub-comment trigger now runs it inside an E2B sandbox instead. Both
-  paths are still documented as supervised, not autonomous, per
-  `SKILL.md` and the registry manifest's `requires_human_supervision:
-  true`.
-- **The E2B sandbox image is missing a dependency it now needs.**
-  `sandbox/swe-agent/Dockerfile` installs `claude-agent-sdk` but not
-  `braintrust`, which `agent.py` now imports unconditionally — a
-  GitHub-comment-triggered run will fail at import time until the image
-  is rebuilt with that dependency added.
-- **Braintrust tracing and the Braintrust eval gate point at two
-  different projects.** `agent.py`'s `init_logger(project="My Project")`
-  vs. `eval.config.py`'s `PROJECT = "agent-factory-pilot"` — nobody has
-  reconciled these, so today's traces aren't even in the project the gate
-  script would look at once it's implemented.
-- **`spec/` no longer exists.** Schema, template, and `triage-policy.md`
-  were deleted from the working tree before this documentation pass, for
-  reasons outside this pass's scope; `tests/test_agent_spec_schema.py`
-  fails unconditionally as a result and hasn't been fixed or removed.
+- **Deploy is code-complete but structurally unreachable.**
+  `promote_agent_activity` and `RegistryPromotionWaiterWorkflow` exist and
+  are registered on the worker, but nothing in this repo ever starts that
+  workflow or fires its `pr_merged` signal — there's no GH Actions step
+  watching the registry PR's merge event. `manifest.yaml.status` can never
+  flip to `active` through automation today, only by hand.
+- **`eval_gate_passed` can now be `true`, but only proves coverage, not
+  correctness.** `run_eval` is a real, implemented v1 gate — it checks the
+  sandbox exited 0, a PR exists, and `spec.md` had success criteria — but
+  it doesn't score any criterion's content. Treat a `true` here as "the
+  agent ran and produced something with criteria to check," not "the
+  criteria were met."
+- **The two `swe-agent` trigger paths still don't share a pipeline.** The
+  Temporal path (Build→Gate→Register) and the GitHub-comment path
+  (Build-only, via `swe-agent-build.yml`) both run inside E2B now, but a
+  PR-comment-triggered build never reaches Eval-Gate, Register, or Deploy
+  — those only exist on the Temporal path. Both are still documented as
+  supervised, not autonomous, per `SKILL.md` and the registry manifest's
+  `requires_human_supervision: true`.
+- **`spec/` is retired, not a gap.** GitHub Spec Kit is the official
+  Spec/Intake flow; the old bespoke `spec/` (schema, template,
+  `triage-policy.md`) is a deliberate cleanup candidate, not something to
+  restore. `tests/test_agent_spec_schema.py` still tests the deleted
+  schema and fails unconditionally — delete it, don't fix it.
 - **LiteLLM is fully configured and unused.** Low-effort, high-value fix
   (see Inference Routing checklist above) — the proxy side of this
   integration is already done; only the harness-side call needs to change.
-- **No CI-wait/retry/re-entry path exists for `swe-agent`.** Every run is a
-  single one-shot attempt. A failing CI check on an agent-authored PR
-  currently has no mechanism to route back into the agent at all.
+- **The Build→Gate retry loop re-enters on the factory's own coverage
+  check, not on the target repo's CI or a human review comment.** A
+  failing CI check on an agent-authored PR, or a reviewer's
+  requested-changes comment, still has no mechanism to route back into
+  the agent at all — only a failed Eval-Gate does.

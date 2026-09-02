@@ -9,22 +9,21 @@ contributor can see at a glance where to plug in next.
 
 ```mermaid
 flowchart LR
-    A["Spec Intake"]:::empty
+    A["Spec Intake\n(Spec Kit)"]:::real
     B["Build"]:::real
-    C["Sandbox Test"]:::partial
-    D{"Eval / Gate\n(tracing real,\nscoring stub)"}:::partial
-    E["Harness Integration"]:::partial
-    F["Deploy"]:::stub
+    C["Sandbox Test"]:::real
+    D{"Eval / Gate\n(v1 coverage gate,\nreal)"}:::real
+    E["Register"]:::real
+    F["Deploy"]:::partial
     G["Monitor"]:::partial
     H{"Retire or Version?"}:::stub
 
-    A -->|"manual: human writes\nspecs/NNN-slug/ via Spec Kit\n(unrelated to the now-deleted spec/ dir)"| B
-    B -->|"Temporal activity\n(host tempdir, no sandbox)\nOR GitHub-comment trigger\n(E2B sandbox)"| C
-    C -.->|"no activity defined —\nTemporal path skips this node;\nGH-comment path runs inside it\nbut still doesn't gate on it"| D
-    D -.->|"scoring code still\nNotImplementedError —\nnothing can pass or fail here"| E
-    D -.->|"fail loop: designed,\nunreachable (gate never runs)"| B
-    E -->|"CI gate enforces\nmanifest shape (real)"| F
-    E -.->|"no auto-registration\non pass"| F
+    A -->|"human writes specs/NNN-slug/\nvia Spec Kit — official flow;\nenforced by verify_spec_exists()"| B
+    B -->|"Temporal AgentPipelineWorkflow\nOR GitHub-comment trigger\n— both now run inside E2B"| C
+    C -->|"Temporal path only:\nrun_swe_agent_activity's PR url\nfeeds eval_gate_activity"| D
+    D -->|"pass: register_activity\nopens factory-repo PR"| E
+    D -.->|"fail loop: real,\nup to MAX_BUILD_ATTEMPTS=3,\nfeedback -> next Build"| B
+    E -.->|"promote_agent_activity exists,\nbut nothing starts/signals\nRegistryPromotionWaiterWorkflow"| F
     F -.->|"no deploy step exists"| G
     G -.->|"Langfuse infra up,\nzero traces flowing in\n(Braintrust tracing is separate,\nsee Eval/Gate)"| H
     H -.->|"no retirement/version\nlogic exists"| H
@@ -35,51 +34,58 @@ flowchart LR
     classDef empty fill:#3d3d3d,stroke:#3d3d3d,color:#fff,stroke-dasharray: 1 4
 ```
 
+**Note:** the GitHub-comment trigger path is Build-only — it has no Gate,
+Register, or Deploy step. The graph above traces the Temporal path, the
+only one that reaches past Sandbox Test.
+
 ## Node-by-node
 
-- **Spec Intake — ⚪ empty.** `spec/` (schema, template, `triage-policy.md`)
-  has been deleted from the working tree entirely — this predates the
-  documentation pass that added this page. The actual accept/escalate
-  decision was always made by a human anyway (the policy doc's own text
-  said escalation routing was "not implemented in this scaffold yet"
-  before it was deleted), so nothing about the *real* workflow changed —
-  but the artifacts describing the intended policy are now gone, and
-  `tests/test_agent_spec_schema.py` fails unconditionally as a result.
-- **Build — 🟢 real.** The one fully automated, fully exercised node:
-  `orchestration/workflows/pipeline_workflow.py` → `run_swe_agent_activity`
-  → `harness/swe-agent/agent.py`. A second, independent entry point now
-  exists too — a PR comment (`@swe-agent build`) driving
-  `.github/workflows/swe-agent-build.yml` — see the Sandbox Test note
-  below for how it changes what happens next.
-- **Sandbox Test — 🟡 partial.** `sandbox/swe-agent/Dockerfile` +
-  `e2b.toml` are real, proven end-to-end (commit `e505938`), and now
-  actually invoked — but only by the GitHub-comment trigger path
-  (`.github/workflows/swe-agent-build.yml` creates/execs/kills the E2B
-  sandbox). The Temporal-triggered path still runs `swe-agent` in a host
-  tempdir, bypassing this node entirely. Also: the sandbox image doesn't
-  yet `pip install` the `braintrust` package `agent.py` now imports at
-  module load — a GH-triggered run will `ImportError` until the
-  `Dockerfile` is updated and the image rebuilt.
-- **Eval/Gate — 🟡 partial.** `eval/braintrust/eval.config.py`'s
-  `load_success_criteria` and `run_eval` both still unconditionally
-  `raise NotImplementedError` — there is no code path by which a candidate
-  could pass *or* fail the actual gate. Separately, both `agent.py` files
-  now call `braintrust.init_logger()` + `auto_instrument()` at import
-  time (added by the Braintrust setup wizard), so traces *are* flowing to
-  Braintrust — just to a project (`"My Project"`) different from the one
-  `eval.config.py` targets (`"agent-factory-pilot"`), and not consumed by
-  any gating logic.
-- **Harness Integration — 🟡 partial.** `registry-gate.yml` is real CI: it
-  blocks any PR touching `registry/**`/`spec/**` unless every agent
-  directory has a `manifest.yaml` and non-empty `versions/`. But nothing
-  automatically creates or updates a registry entry when a build passes —
-  `registry/agents/swe-agent/` was added by hand, once.
-- **Deploy — ⚪ stub.** No deploy step, canary, or staged rollout exists
-  anywhere in the repo for an agent itself (the pipeline's own CI/CD is a
-  separate concern from deploying a *produced* agent).
+- **Spec Intake — 🟢 real (Spec Kit, human-authored by design).**
+  GitHub Spec Kit (`/speckit-specify` → `/speckit-plan` → `/speckit-tasks`,
+  producing `specs/NNN-slug/`) is the official, only supported intake flow
+  — enforced at runtime by `swe-agent`'s `verify_spec_exists()`. The old
+  bespoke `spec/` (schema, template, `triage-policy.md`) is retired, not a
+  gap to restore; nothing about the real workflow needs it back.
+  `tests/test_agent_spec_schema.py` still tests the deleted schema and
+  fails unconditionally — cleanup candidate, pending deletion.
+- **Build — 🟢 real.** `orchestration/workflows/pipeline_workflow.py`'s
+  `AgentPipelineWorkflow` → `run_swe_agent_activity` → `harness/swe-agent/agent.py`,
+  now inside an E2B sandbox (`AsyncSandbox.create`/`.commands.run`/`.kill`).
+  A second, independent entry point still exists — a PR comment
+  (`@swe-agent build`) driving `.github/workflows/swe-agent-build.yml`,
+  which also runs sandboxed but stops after this node (no Gate/Register).
+- **Sandbox Test — 🟢 real.** `sandbox/swe-agent/Dockerfile` + `e2b.toml`
+  are proven end-to-end (commit `e505938`) and now `pip install` both
+  `claude-agent-sdk` and `braintrust>=0.36.0` — the earlier missing-dependency
+  `ImportError` gap is fixed. Collapsed into the Build activity rather than
+  a separate one, per `registry/agents/swe-agent/versions/v1.yaml`.
+- **Eval/Gate — 🟢 real (coverage gate, not semantic scoring).**
+  `eval/braintrust/eval.config.py::run_eval` parses `- **SC-NNN**: ...`
+  bullets from the branch's `specs/*/spec.md` and passes iff the sandbox
+  exited 0, a PR url exists, and at least one criterion was found —
+  content of each criterion is not verified. `orchestration/activities.py::eval_gate_activity`
+  clones the branch read-only to reach `spec.md` and is retried up to 4
+  times on transient failure. On fail, `pipeline_workflow.py` loops back to
+  Build (up to `MAX_BUILD_ATTEMPTS=3`) with the gate's `reason` as feedback.
+  Braintrust tracing (`agent.py`'s `init_logger`/`auto_instrument`) and the
+  gate now share one project (`BRAINTRUST_PROJECT`, default
+  `"agent-factory-pilot"`) — the earlier project-name split is fixed.
+- **Register — 🟢 real.** `register_activity` opens a PR against this
+  factory repo writing/updating `registry/agents/<name>/manifest.yaml` and
+  `versions/<version>.yaml` from the real `eval_gate_activity` result,
+  reusing an already-open PR on retry instead of stacking duplicates.
+  `registry-gate.yml` (CI) still separately enforces the directory-shape
+  invariant on any PR touching `registry/**`.
+- **Deploy — 🟡 partial (code exists, unreachable).** `promote_agent_activity`
+  flips `manifest.yaml.status` to `active` via another factory-repo PR, and
+  `RegistryPromotionWaiterWorkflow` waits on a `pr_merged` signal to run
+  it — but nothing in this repo ever starts that workflow or sends that
+  signal (no GH Actions step, webhook, or CLI does it). Functionally this
+  node still never fires.
 - **Monitor — 🟡 partial.** Langfuse and its Postgres/ClickHouse backing
   run via the root `docker-compose.yml`. No code in `harness/swe-agent` or
-  `orchestration/` emits a trace to it.
+  `orchestration/` emits a trace to it (Braintrust tracing is a separate
+  service, feeding Eval/Gate above, not Langfuse).
 - **Retire or Version — ⚪ stub.** No decision logic, scheduled review, or
   retirement mechanism exists.
 
