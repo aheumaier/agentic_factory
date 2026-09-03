@@ -1,0 +1,77 @@
+name: pm-agent-shape
+
+# Reusable workflow (Harness/Runtime, §3.2) — holds all the real logic
+# for a GitHub-comment-triggered Issue-Shaping run. Callers never copy
+# this file; they invoke it via `uses:` (see pm-agent-shape-trigger.yml
+# for the ~10-line caller). Runs in the calling (target) repo's workflow
+# context, so github.repository / github.event are the caller's, not
+# this repo's.
+#
+# shape_issue() fetches title/body itself via `gh issue view` — nothing
+# here passes them through this workflow. Runtime-supplied context
+# values (repo, issue number) are still passed into `run:` steps via
+# `env:` and referenced as `"$VAR"`, never interpolated directly via
+# `${{ }}`, mirroring swe-agent-build.yml's own convention for anything
+# that ultimately reaches an argv or a prompt.
+#
+# Issue-Shaping binds zero tools to the model (tools=[]) — checking out
+# the factory's public source onto the target repo's runner carries none
+# of the "attacker-shaped Bash" risk swe-agent's own sandboxing deals
+# with, since there is no Bash here at all.
+on:
+  workflow_call: {}
+
+permissions:
+  issues: write
+
+jobs:
+  shape:
+    if: >-
+      github.event.issue.pull_request == null &&
+      startsWith(github.event.comment.body, '@pm-agent shape') &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    env:
+      REPO: ${{ github.repository }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PM_AGENT_APP_ID }}
+          private-key: ${{ secrets.PM_AGENT_APP_PRIVATE_KEY }}
+
+      - name: checkout agentic_factory
+        uses: actions/checkout@v4
+        with:
+          repository: aheumaier/agentic_factory
+          ref: main
+          path: agentic_factory
+
+      - name: setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: shape issue
+        id: shape
+        continue-on-error: true
+        env:
+          ANTHROPIC_PLATFORM_API_KEY: ${{ secrets.ANTHROPIC_PLATFORM_API_KEY }}
+          BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          uv run --project agentic_factory/harness/pm-agent python -c "
+          import asyncio, os
+          from agent import shape_issue
+          asyncio.run(shape_issue(os.environ['REPO'], int(os.environ['ISSUE_NUMBER'])))
+          "
+
+      - name: post failure comment
+        if: always() && steps.shape.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+            --body "pm-agent: shaping this issue failed — a human should look at it directly."
