@@ -1,0 +1,16 @@
+name: pm-agent
+owner: andreas.heumaier@sdui.de
+current_version: v1
+status: experimental
+eval_gate_passed: false
+requires_human_supervision: true
+description: >-
+  PM agent (Harness/Runtime) backing two independently callable
+  capabilities: Issue-Shaping (rewrites a raw issue's title/body for
+  scope clarity, zero bound tools) and Spec-Review (posts a
+  value-judgment review of a spec to a target-repo PR, read-only against
+  the branch under review). See harness/pm-agent/SKILL.md for each
+  capability's distinct trigger and tool-access design.
+design_docs:
+  - specs/003-pm-agent-review-gate/spec.md
+  - harness/pm-agent/SKILL.md
