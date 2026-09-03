@@ -7,7 +7,13 @@ and Spec-Review Writeup now documents its idempotency marker (`research.md`
 Unknown 5). Updated again after a second review the same day: the `pr_url`
 cross-spec gap section gains two siblings below (a spec-path resolution bug
 found in `orchestration/activities.py`, and an unresolved cross-stage SHA-pin
-gap), per `research.md` Unknowns 3, 7.
+gap), per `research.md` Unknowns 3, 7. Updated again after a third review
+the same day: Raw Issue / Shaped Issue now documents a preservation step
+(FR-002a) instead of an unrecoverable overwrite; the Spec-Review Writeup's
+idempotency marker now includes the spec's commit SHA, partially closing
+the cross-stage SHA-pin gap below; the spec-path resolution section now
+notes this bug is a blocking dependency for this feature's own gate score,
+not merely an adjacent nuisance.
 
 No database or persisted store — every entity below lives in GitHub (an
 issue, a PR comment) or is a plain function argument/return value, per the
@@ -20,7 +26,11 @@ concrete representation in `harness/pm-agent/agent.py`.
 `gh issue view <n> --json title,body,closedByPullRequestsReferences` and
 written via `gh issue edit <n> --title ... --body ...`. Not modeled as a
 local class — `shape_issue()` passes the fetched `dict` straight into the
-model's prompt as text and writes back whatever text the model returns.
+model's prompt as text. Before writing the model's rewritten text back, it
+posts the **original** fetched `title`/`body` as a `gh issue comment`
+(FR-002a) — this is a model-authored, one-way overwrite on a target repo
+with no other human checkpoint in this job's path, so the preserving
+comment is the sole recovery mechanism if the shaping is wrong or unwanted.
 
 **Fields** (as returned by `gh issue view --json`):
 | Field | Type | Notes |
@@ -39,24 +49,30 @@ model's prompt as text and writes back whatever text the model returns.
   (FR-002) — enforced structurally by binding zero tools to the model (see
   `research.md` Unknown 1), not by a runtime check.
 
-**State transitions**: Raw Issue → Shaped Issue is one-way and terminal;
-Shaped Issue has no further states within this feature (a human's later,
-separate decision to write `spec.md` is out of scope, per spec Assumptions).
+**State transitions**: Raw Issue → Shaped Issue is one-way and terminal for
+the issue's `title`/`body` fields; the original content is not lost,
+because it survives as a preceding comment (FR-002a). Shaped Issue has no
+further states within this feature (a human's later, separate decision to
+write `spec.md` is out of scope, per spec Assumptions).
 
 ## Spec-Review Writeup
 
 **Representation**: A plain string (Markdown) returned by the model in
 `review_spec()`, posted via `gh pr comment <pr_url> --body ...` (code, not
 the model). Its first line is a hidden idempotency marker, `<!--
-pm-agent:review attempt=<N> -->` (see `research.md` Unknown 5) — not
-persisted anywhere else; the PR comment thread is the artifact's home, per
-`docs/70-multi-agent-pipeline-design.md` §8.
+pm-agent:review attempt=<N> spec=<sha> -->` (see `research.md` Unknown 5,
+extended) — not persisted anywhere else; the PR comment thread is the
+artifact's home, per `docs/70-multi-agent-pipeline-design.md` §8. `attempt`
+is the sole idempotency key (strictly increasing per distinct review
+request); `spec` (the checkout's short commit SHA at review time) is
+recorded for human legibility and partially addresses the cross-stage
+SHA-pin gap below — it is not itself compared on the idempotency check.
 
 **Fields** (conceptual, all folded into the one Markdown string — no
 structured schema is required by any FR):
 | Field | Notes |
 |---|---|
-| Idempotency marker | `<!-- pm-agent:review attempt=<N> -->`, first line; checked before posting to avoid a double-post on retry |
+| Idempotency marker | `<!-- pm-agent:review attempt=<N> spec=<sha> -->`, first line; the `attempt` portion is checked before posting to avoid a double-post on retry |
 | Rightness-of-scope assessment | FR-005: is this the right thing to build |
 | Scope/gold-plating flag | FR-005: explicit no-gold-plating note |
 | Attempt number | Also included in human-visible text so a reader can tell which re-review this is |
@@ -101,9 +117,15 @@ or `specs/005-pipeline-mode-signals-escalation/`, not this feature).
 
 ## Spec-path resolution — a bug found adjacent to, but outside, this feature
 
-**Status**: `review_spec()` resolves its target spec as `specs/<branch>/spec.md`
-directly from its own `branch` argument (`research.md` Unknown 7), not a
-glob — this feature's own code does not have the bug described below. But
+**Status**: `review_spec()` resolves its target spec as `<spec_dir>/spec.md`,
+where `spec_dir` defaults to `specs/<branch>` (derived from its own `branch`
+argument, `research.md` Unknown 7) but is caller-overridable — not a
+glob — this feature's own code does not have the bug described below. The
+default assumes a feature branch's name is its spec slug, which holds for
+this feature's own branch but not universally in this repo's actual
+practice (e.g. `specs/002`, `004`-`007` currently sit on `main`, not a
+matching branch); the override exists precisely so a caller in that
+situation isn't forced into the same bug this section describes below. But
 the review that found the need for that fix also found that
 `orchestration/activities.py`'s `eval_gate_activity` (lines ~128-135) globs
 `specs/*/spec.md` and takes `sorted(...)[0]` unconditionally, which resolves
@@ -114,7 +136,13 @@ fix (it lives entirely inside `orchestration/`, outside `harness/pm-agent/`
 and this feature's Project Structure). Recorded here, next to the
 `pr_url` gap below, so it is not lost: whoever next touches
 `eval_gate_activity` should fix it the same way — derive the path from the
-branch being evaluated, not a glob.
+branch being evaluated, not a glob. **This is not merely an adjacent
+nuisance**: `eval/braintrust/eval.config.py` parses `spec.md`'s own `SC-NNN`
+bullets to score an implementation of this feature (per `spec.md`'s
+revision note), and this bug means that score is unreachable on any
+checkout of this repo as it stands today — a blocking dependency for
+treating this feature as gate-passed, independent of whether
+`harness/pm-agent/agent.py` itself is correct.
 
 ## Cross-stage spec version — an unresolved cross-spec gap (new)
 
@@ -135,6 +163,13 @@ responsibility per its Assumptions) but is recorded here as an open gap for
 whoever next touches `specs/002-webhook-trigger-bridge/` or
 `specs/005-pipeline-mode-signals-escalation/`, alongside the `pr_url` gap
 above, since both are "no producer of X exists yet" gaps of the same shape.
+This revision narrows, but does not close, the gap: the Spec-Review
+Writeup's idempotency marker now records the reviewed spec's short commit
+SHA (`<!-- pm-agent:review attempt=<N> spec=<sha> -->`), so a human reading
+the PR thread can see which version a given writeup judged — but nothing
+yet carries that SHA forward into a structured field the Eval-Gate stage
+could compare against, which is the actual fix and remains 002/005's to
+build.
 
 ## `PmAttemptsExhausted` — removed (was: new, this feature)
 

@@ -1,6 +1,6 @@
 # Quickstart: PM-Agent Issue-Shaping and Spec-Review Gate
 
-**Revision note**: Updated after two senior-architect review passes on
+**Revision note**: Updated after three senior-architect review passes on
 2026-09-03. First pass: `review_spec()` now returns a dict and is never
 expected to raise on attempt exhaustion (Unknown 3); a credential-scrub
 check replaces the old clone-URL-string check for FR-007 (Unknown 2);
@@ -8,31 +8,49 @@ Issue-Shaping is validated via its real trigger shape (Unknown 4). Second
 pass: both capabilities now go direct-to-Anthropic, not LiteLLM (Unknown
 1); the FR-007 verification step also checks `GH_CONFIG_DIR` (Unknown 2,
 revised again); Issue-Shaping's linked-PR edge case checks
-`closedByPullRequestsReferences` (Unknown 8).
+`closedByPullRequestsReferences` (Unknown 8). **Third pass**: the
+credential-scrub verification step now checks `os.environ` state, not an
+`env=` dict shape (Unknown 2, corrected); a no-`Bash`/no-hooks check
+replaces the old "inspect the environment via `Bash`" step, since
+Spec-Review no longer binds `Bash` at all; Spec-Review now goes through
+LiteLLM, not direct-to-Anthropic (Unknown 9); Issue-Shaping's edit step now
+has a preceding preservation-comment check (FR-002a).
 
 ## Prerequisites
 
 - `gh` CLI authenticated (ambient credential helper, or `GH_TOKEN` set for
   Issue-Shaping's issue-edit call)
 - `harness/pm-agent/` dependencies installed: `cd harness/pm-agent && uv sync`
-- `ANTHROPIC_API_KEY` set for **both** capabilities — Issue-Shaping and
-  Spec-Review are both documented deviations from this repo's default
-  LiteLLM-routing convention, for two distinct reasons (network
-  reachability from a target repo's GitHub-hosted runner for Issue-Shaping;
-  Spec-Kit skill discovery for Spec-Review — `research.md` Unknown 1).
-  `LITELLM_BASE_URL` is not used by this feature.
+- `ANTHROPIC_PLATFORM_API_KEY` set for Issue-Shaping — a documented deviation from
+  this repo's default LiteLLM-routing convention, justified by network
+  reachability from a target repo's GitHub-hosted runner (`research.md`
+  Unknown 1). `BRAINTRUST_API_KEY` set for both capabilities (Braintrust
+  tracing, per `plan.md`'s Foundational setup).
+- `LITELLM_BASE_URL`/`LITELLM_MASTER_KEY` set for Spec-Review — it is
+  LiteLLM-routed, matching this repo's default convention, since it runs
+  on the orchestration worker host (reachable) and no longer needs Claude
+  Code's own skill discovery (`research.md` Unknown 9). Not used by
+  Issue-Shaping.
+- For the Issue-Shaping trigger on an opted-in **target** repo: the
+  `pm-agent`-scoped GitHub App installed with `issues: write`, and
+  `ANTHROPIC_PLATFORM_API_KEY`/`BRAINTRUST_API_KEY` available to that repo's Actions
+  secrets (`secrets: inherit` does not create secrets that don't already
+  exist there).
 
 ## Validate User Story 1 — Issue-Shaping
 
 1. File a test issue with vague scope on a scratch repo, no linked PR.
-2. Run:
+2. Run (from `harness/pm-agent/`, so `agent` resolves without a `PYTHONPATH`
+   override):
    ```
-   uv run --project harness/pm-agent python -c \
+   cd harness/pm-agent && uv run python -c \
      "import asyncio; from agent import shape_issue; \
       print(asyncio.run(shape_issue('<owner>/<repo>', <issue_number>)))"
    ```
 3. **Expected**: `gh issue view <issue_number>` shows an edited title/body
-   with added scope clarity and an explicit no-gold-plating note.
+   with added scope clarity and an explicit no-gold-plating note, and a
+   preceding comment on the issue containing the original, pre-shaping
+   title/body (FR-002a — the only recovery path for this overwrite).
 4. **Verify no side effects** (SC-001): `git branch -a` and `specs/` on the
    scratch repo are unchanged; no Temporal workflow was started (nothing in
    this feature can start one — see the interface contract's postcondition).
@@ -53,23 +71,26 @@ revised again); Issue-Shaping's linked-PR edge case checks
    and a PR is open for that branch (this feature does not create that PR —
    see `data-model.md`'s "`pr_url`" section; create one manually for this
    quickstart).
-2. Run:
+2. Run (from `harness/pm-agent/`, so `agent` resolves without a
+   `PYTHONPATH` override):
    ```
-   uv run --project harness/pm-agent python -c \
+   cd harness/pm-agent && uv run python -c \
      "import asyncio; from agent import review_spec; \
       print(asyncio.run(review_spec('<owner>/<repo>', '<branch>', \
       '<pr_url>', attempt=1)))"
    ```
 3. **Expected** (SC-002): the call returns `{"writeup": ..., "attempt": 1}`,
    and a value-judgment writeup appears as a new comment on `<pr_url>`,
-   addressing scope/rightness and flagging any apparent gold-plating.
-4. **Verify no push or API mutation, structurally** (FR-007): inspect the
-   environment `review_spec()` passes to the model's tool-use loop (e.g. via
-   a test double, or by having the prompt ask the model to `env | grep
-   -E 'GH_TOKEN|GH_CONFIG_DIR'` and run `gh auth status`) — `GH_TOKEN`/
-   `GITHUB_TOKEN` must be absent, `GH_CONFIG_DIR` must point at an empty
-   directory (so `gh auth status` reports not logged in, even on a host
-   with an ambient `gh` login), and `git config --local --get
+   addressing scope/rightness and flagging any apparent gold-plating, with
+   a leading `<!-- pm-agent:review attempt=1 spec=<sha> -->` marker.
+4. **Verify no tool-execution or credential surface, structurally**
+   (FR-007): via a test double (not the model — it has no `Bash` to run a
+   shell check with), confirm the `ClaudeAgentOptions` passed to `query()`
+   has `tools == ["Read", "Grep", "Glob"]` and `setting_sources == []`, and
+   inspect `os.environ` for the duration of the model call — `GH_TOKEN`/
+   `GITHUB_TOKEN` must be absent (popped from the parent process, not
+   merely omitted from an `env=` dict), the `env=` override must point
+   `GH_CONFIG_DIR` at an empty directory, and `git config --local --get
    credential.helper` in the checkout must return empty. Then, separately,
    confirm `git log origin/<branch>` on the real remote shows no new commit
    from this run.
