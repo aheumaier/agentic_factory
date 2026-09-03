@@ -4,11 +4,20 @@ already produced upstream (Spec/Intake, §3.1, done manually), then opens
 a PR. See SKILL.md for what's deliberately deferred this pass.
 """
 import glob
+import os
 import re
 import subprocess
 from pathlib import Path
 
+import braintrust
 from claude_agent_sdk import ClaudeAgentOptions, query
+
+# Observability (§3.8): same project as eval/braintrust/eval.config.py, so a
+# run's trace and its Eval-Gate score land side by side.
+BRAINTRUST_PROJECT = os.environ.get("BRAINTRUST_PROJECT", "agent-factory-pilot")
+
+logger = braintrust.init_logger(project=BRAINTRUST_PROJECT)
+braintrust.auto_instrument()
 
 IMPLEMENT_PROMPT = """/speckit-implement
 
@@ -19,6 +28,13 @@ fully pass, in which case say why in the commit message; a human \
 reviews the result either way. When you are done, STOP: do not run \
 `git push` and do not open a pull request. A separate step outside \
 this conversation handles pushing and opening the PR."""
+
+FEEDBACK_PROMPT_SUFFIX = """
+
+The previous attempt on this branch failed the Eval-Gate. Feedback:
+{feedback}
+
+Address this feedback before re-running verification and committing."""
 
 # repo/branch are workflow inputs (ultimately caller-supplied) threaded
 # straight into git/gh argv. Reject anything not shaped like a plain
@@ -39,6 +55,27 @@ def _validate_branch(branch: str) -> None:
         raise ValueError(f"Refusing to use unexpected branch value: {branch!r}")
 
 
+def _scrubbed(
+    error: subprocess.CalledProcessError, secret: str
+) -> subprocess.CalledProcessError:
+    """Copy of `error` with `secret` redacted everywhere it could surface.
+
+    Rebuilding rather than mutating in place also covers `args`, which
+    `repr()` prints and which keeps a reference to the *original* cmd
+    list even after `error.cmd` is reassigned.
+    """
+
+    def redact(value: str | None) -> str:
+        return (value or "").replace(secret, "***")
+
+    return subprocess.CalledProcessError(
+        error.returncode,
+        [redact(arg) for arg in error.cmd],
+        output=redact(error.output),
+        stderr=redact(error.stderr),
+    )
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -55,7 +92,23 @@ def clone_and_checkout(repo: str, branch: str, work_root: Path) -> Path:
     # latter defers to the local gh CLI's configured git_protocol
     # (per-host in ~/.config/gh/hosts.yml), which may be set to ssh with
     # no working key, as it was on this machine.
-    _run(["git", "clone", f"https://github.com/{repo}.git", str(work_root)])
+    #
+    # GH_TOKEN (e.g. a GitHub App installation token minted by the caller)
+    # is embedded in the clone URL so this works with no ambient `gh`/git
+    # credential helper — required inside an ephemeral E2B sandbox, which
+    # has neither. Unset falls back to the unauthenticated URL, keeping the
+    # host-CLI path (which does have a credential helper) unchanged.
+    token = os.environ.get("GH_TOKEN")
+    credential = f"x-access-token:{token}@" if token else ""
+    clone_url = f"https://{credential}github.com/{repo}.git"
+    try:
+        _run(["git", "clone", clone_url, str(work_root)])
+    except subprocess.CalledProcessError as e:
+        # Never let the embedded credential reach a log or PR comment.
+        if not token:
+            raise
+        raise _scrubbed(e, token) from None
+
     _run(["git", "fetch", "origin", branch], cwd=work_root)
     _run(["git", "checkout", branch], cwd=work_root)
     return work_root
@@ -90,9 +143,12 @@ def build_options(cwd: Path) -> ClaudeAgentOptions:
     )
 
 
-async def run_implement(checkout: Path) -> str:
+async def run_implement(checkout: Path, feedback: str | None = None) -> str:
+    prompt = IMPLEMENT_PROMPT
+    if feedback:
+        prompt += FEEDBACK_PROMPT_SUFFIX.format(feedback=feedback)
     transcript: list[str] = []
-    async for message in query(prompt=IMPLEMENT_PROMPT, options=build_options(checkout)):
+    async for message in query(prompt=prompt, options=build_options(checkout)):
         transcript.append(str(message))
     return "\n".join(transcript)
 
@@ -162,11 +218,11 @@ def verify_pr_exists(repo: str, branch: str) -> str:
     return urls[0]
 
 
-async def run(repo: str, branch: str, work_root: Path) -> str:
+async def run(repo: str, branch: str, work_root: Path, feedback: str | None = None) -> str:
     checkout = clone_and_checkout(repo, branch, work_root)
     verify_spec_exists(checkout)
     sha_before = _head_sha(checkout)
-    await run_implement(checkout)
+    await run_implement(checkout, feedback)
     verify_left_main(checkout, branch)
     verify_new_commit(checkout, sha_before)
     title = f"Implement {branch}"
@@ -181,8 +237,10 @@ if __name__ == "__main__":
 
     async def _main() -> None:
         repo, branch = sys.argv[1], sys.argv[2]
+        feedback = sys.argv[3] if len(sys.argv) > 3 else None
         with tempfile.TemporaryDirectory() as td:
-            pr_url = await run(repo, branch, Path(td))
+            pr_url = await run(repo, branch, Path(td), feedback)
             print(pr_url)
 
     asyncio.run(_main())
+    logger.flush()

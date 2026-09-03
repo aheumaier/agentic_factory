@@ -1,0 +1,13 @@
+name: pm-agent-shape-trigger
+
+# Caller wrapper — the ~10-line file every opted-in target repo copies.
+# This copy is the reference/dogfood instance for agentic_factory
+# itself. All real logic lives in the reusable workflow this calls.
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  shape:
+    uses: aheumaier/agentic_factory/.github/workflows/pm-agent-shape.yml@main
+    secrets: inherit

@@ -13,7 +13,16 @@ tools_allowed:
 scope: implement-only
 deviations_from_design:
   - "agent-swe-design.md §5 steps 1-3 (/speckit-specify -> /speckit-plan -> /speckit-tasks) run upstream, manually, not by this agent."
-  - "Runs in a host tempdir, not an E2B sandbox (§3.3 deferred)."
-  - "No CI-wait/retry loop or needs-human labeling (§5 steps 8-9, §8)."
+  - "No needs-human labeling (§5 step 9, §8)."
   - "No tool-level enforcement against the agent pushing/opening its own PR — see harness/swe-agent/SKILL.md 'Known gap'."
-eval_gate: not wired this version (eval/ still raises NotImplementedError)
+eval_gate: >-
+  v1 binary coverage gate (eval/braintrust/eval.config.py) — checks sandbox
+  exit_code==0, a pr_url is present, and success criteria were found in
+  spec.md; criteria are not scored semantically yet. The Temporal workflow
+  loops Build->Gate up to MAX_BUILD_ATTEMPTS=3, feeding the gate's reason
+  back to the agent as feedback
+  (orchestration/workflows/pipeline_workflow.py).
+sandbox: >-
+  E2B sandbox, template swe-agent-sandbox (sandbox/swe-agent/e2b.toml), not a
+  host tempdir. Sandbox Test (§3.3) is collapsed into orchestration_entrypoint
+  rather than run as a separate stage.

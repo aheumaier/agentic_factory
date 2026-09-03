@@ -1,10 +1,18 @@
 # Inference Routing (§3.4) — self-hosted LiteLLM proxy. Provider keys stay
-# on this proxy; the harness never holds an ANTHROPIC_API_KEY directly.
+# on this proxy; the harness never holds an ANTHROPIC_PLATFORM_API_KEY directly.
 model_list:
   - model_name: claude-sonnet
     litellm_params:
       model: anthropic/claude-sonnet-5
-      api_key: os.environ/ANTHROPIC_API_KEY
+      api_key: os.environ/ANTHROPIC_PLATFORM_API_KEY
+  # The Claude Agent SDK CLI requests "claude-sonnet-5" by default (its
+  # own model id, not this proxy's route name) — a caller pointing the
+  # CLI at this proxy via ANTHROPIC_BASE_URL needs a route matching that
+  # exact name, found live while validating specs/003-pm-agent-review-gate.
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_PLATFORM_API_KEY
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

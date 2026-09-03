@@ -1,0 +1,13 @@
+name: swe-agent-trigger
+
+# Caller wrapper — the ~10-line file every opted-in repo has. This copy is
+# the reference/dogfood instance for agentic_factory itself. All real
+# logic lives in the reusable workflow this calls.
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  build:
+    uses: aheumaier/agentic_factory/.github/workflows/swe-agent-build.yml@main
+    secrets: inherit

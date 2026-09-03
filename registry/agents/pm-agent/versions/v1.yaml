@@ -1,0 +1,47 @@
+version: v1
+promoted: 2026-09-03
+harness_entrypoint: harness/pm-agent/agent.py
+orchestration_entrypoint: none — review_spec() is not yet wired as a Temporal activity
+capabilities:
+  - name: shape_issue
+    trigger: "GitHub Actions, target-repo issue comment '@pm-agent shape' (.github/workflows/pm-agent-shape.yml + pm-agent-shape-trigger.yml)"
+    model_runtime: Claude Agent SDK, direct-to-Anthropic (network-reachability deviation — runs on a target repo's GitHub-hosted runner, which cannot reach the self-hosted LiteLLM proxy)
+    tools_allowed: []
+    scope: >-
+      Rewrites an issue's title/body for scope clarity and an explicit
+      no-gold-plating note. Refuses if the issue already has a linked
+      pull request. Zero bound tools — the gh issue edit mutation runs
+      from code, after the model call returns, and only after the
+      original content is preserved as a comment.
+  - name: review_spec
+    trigger: "None yet — directly callable Python function; a future Temporal activity or GH Actions step is the intended caller"
+    model_runtime: Claude Agent SDK, LiteLLM-routed (matches this repo's default convention — runs on the orchestration worker host, which can reach the proxy)
+    tools_allowed:
+      - Read
+      - Grep
+      - Glob
+    scope: >-
+      Posts a value-judgment review (rightness of scope, explicit
+      gold-plating flag) of a shallow clone's spec.md to a target-repo
+      PR. No Bash, setting_sources=[] (no hook auto-execution from the
+      branch under review), and GH_TOKEN/GITHUB_TOKEN are popped from
+      the parent process for the duration of the model call. Idempotent
+      per attempt via a hidden marker comment; does not enforce an
+      attempt cap.
+deviations_from_design:
+  - "Issue-Shaping and Spec-Review are independently callable capabilities in one harness module, not two separate agents — see SKILL.md."
+  - "review_spec() has no Temporal-activity wiring, no pm_approved/pm_rejected decision-delivery mechanism, and no attempt-budget enforcement — all out of scope per specs/003-pm-agent-review-gate/spec.md's Assumptions."
+  - "No producer of a target-repo PR exists before review_spec() runs — pr_url is caller-supplied and assumed to already exist."
+eval_gate: >-
+  Not yet reachable for this feature's own gate score:
+  orchestration/activities.py::eval_gate_activity globs specs/*/spec.md
+  and takes sorted(...)[0], which resolves to
+  001-agent-spec-schema-test on this repo's checkout regardless of
+  branch — a pre-existing bug outside this feature, recorded in
+  specs/003-pm-agent-review-gate/data-model.md.
+sandbox: >-
+  None — agent.py does not provision a sandbox for either capability, matching
+  harness/swe-agent/agent.py's own split. Spec-Review's FR-007 no-push
+  guarantee holds at the tool-binding/setting-source/credential level
+  regardless of execution environment; running it inside an E2B sandbox
+  remains recommended defense-in-depth for a future caller, not enforced here.
