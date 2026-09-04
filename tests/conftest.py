@@ -65,3 +65,28 @@ if "braintrust" not in sys.modules:
     _bt_stub.init_logger = init_logger
     _bt_stub.auto_instrument = auto_instrument
     sys.modules["braintrust"] = _bt_stub
+
+
+def _load_agent(name: str, path: Path) -> types.ModuleType:
+    """Load a second harness/<agent>/agent.py under its own module name.
+
+    `import agent` (above) puts harness/pm-agent/ on sys.path so
+    tests/test_pm_agent.py can `import agent` — a second
+    harness/<agent>/agent.py would collide on that same module name if
+    loaded the same way. Loading by explicit file path under a distinct
+    name avoids the collision without touching the existing path shim or
+    test_pm_agent.py.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+architect_agent = _load_agent(
+    "architect_agent", REPO_ROOT / "harness" / "architect-agent" / "agent.py"
+)

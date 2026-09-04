@@ -102,6 +102,12 @@ When any stage's bounded number of automatic retry attempts is used up without s
 - **FR-011**: When any stage's bounded retry budget is exhausted without success, system MUST stop making further automatic attempts at that stage and MUST signal that a human decision (resume or abandon) is needed, rather than terminating with no human-visible outcome.
 - **FR-012**: On a resume decision after escalation, system MUST make one further attempt at the stage where the run stalled.
 - **FR-013**: On an abandon decision after escalation, system MUST end the run without further attempts.
+- **FR-014**: For the architect stage specifically, the retry budget of FR-010 MUST be charged according to `specs/004-architect-fanout-judge/contracts/architect-agent-interface.md`'s **Consumer obligations** and `specs/004-architect-fanout-judge/spec.md`'s "Consumer obligations" subsection, both of which 004 originates but cannot itself implement (it deliberately does not name `MAX_PLAN_ATTEMPTS`). Concretely, the system MUST:
+  - charge **one** plan attempt when the stage returns `gap_round_ran: True` — 004's FR-010 requires the gap-driven round to cost an attempt, and because that round runs *inside* one stage call, only this layer can charge it. Without this, the round is free and 004's FR-010 is violated silently (CO-1);
+  - charge **one** plan attempt on a **deterministic** scoring/synthesis/critic-step error (004 FR-013a's deterministic half, CO-2), and **not** charge one on a **transient** error (004 FR-013a's transient half, CO-2a), retrying at the activity level instead;
+  - **not** charge a plan attempt on the stage's `MAX_MALFORMED_RETRIES`-exhausted failure (004 FR-013), and route it to FR-011's escalation instead (CO-3). This is not a budget exhaustion, so FR-011 does not fire on its own — without an explicit mapping the run dies with no human-visible outcome, exactly the failure FR-011 exists to eliminate;
+  - branch on the stage's `idempotent_hit` flag before reading any other result key (CO-4), since the idempotent early-return is a degraded three-key shape rather than the full result dict.
+- **FR-015**: Inserting the architect stage ahead of Build changes `AgentPipelineWorkflow`'s activity sequence, so system MUST choose and apply a determinism-preserving migration for executions in flight — either `workflow.patched(...)` around the new step or a new workflow name on a new task queue — rather than editing the sequence in place.
 
 ### Key Entities
 

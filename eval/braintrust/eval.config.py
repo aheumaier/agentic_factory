@@ -39,6 +39,32 @@ def load_success_criteria(spec_path: str) -> list[str]:
     ]
 
 
+# Separate regex (not a second capture group on _SC_BULLET_RE): that regex's
+# group(1) is read as the criterion text by load_success_criteria() above,
+# so adding an id-capturing group would shift numbering and change its
+# return value.
+_SC_BULLET_ID_RE = re.compile(
+    r"-\s+\*\*(SC-\d+)\*\*:\s*(.+?)(?=\n-\s+\*\*SC-\d+\*\*:|\n#{1,6}\s|\Z)",
+    re.DOTALL,
+)
+
+
+def load_success_criteria_ids(spec_path: str) -> list[tuple[str, str]]:
+    """Like `load_success_criteria`, but returns `(id, text)` pairs so a
+    caller (harness/architect-agent/agent.py) can key structures on the
+    same `SC-NNN` id set the Eval-Gate uses."""
+    text = open(spec_path, encoding="utf-8").read()
+    marker = "### Measurable Outcomes"
+    idx = text.find(marker)
+    if idx == -1:
+        raise ValueError(f"{spec_path!r} has no '### Measurable Outcomes' section")
+    section = text[idx + len(marker) :]
+    return [
+        (match.group(1), " ".join(match.group(2).split()))
+        for match in _SC_BULLET_ID_RE.finditer(section)
+    ]
+
+
 def run_eval(spec_path: str, sandbox_trace: dict) -> dict:
     """Binary coverage gate: pass iff the sandbox run exited 0, produced a
     PR, and at least one success criterion was found to check against.
