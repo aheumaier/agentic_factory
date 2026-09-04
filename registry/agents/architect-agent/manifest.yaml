@@ -1,0 +1,19 @@
+name: architect-agent
+owner: andreas.heumaier@sdui.de
+current_version: v1
+status: experimental
+eval_gate_passed: false
+requires_human_supervision: true
+description: >-
+  Architect agent (Harness/Runtime) backing one stage entrypoint,
+  run_architect_stage(): fans out N candidate plans from distinct
+  architectural angles, scores each against the spec's SC-NNN success
+  criteria plus a 1-5 internal-consistency rating, synthesizes exactly
+  one plan/tasks/ADR set from the computed winner, and runs an
+  independent completeness-critic pass that may trigger one
+  gap-targeted candidate and one re-synthesis. See
+  harness/architect-agent/SKILL.md for each role's distinct tool access
+  and this stage's known gaps.
+design_docs:
+  - specs/004-architect-fanout-judge/spec.md
+  - harness/architect-agent/SKILL.md

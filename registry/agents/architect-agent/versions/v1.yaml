@@ -1,0 +1,42 @@
+version: v1
+promoted: 2026-09-04
+harness_entrypoint: harness/architect-agent/agent.py
+orchestration_entrypoint: none (no Temporal activity in this feature — specs/005-pipeline-mode-signals-escalation/)
+model_runtime: Claude Agent SDK via LiteLLM proxy
+tools_allowed:
+  - Read
+  - Grep
+  - Glob
+model: claude-sonnet-5
+capabilities:
+  - name: run_architect_stage
+    trigger: "None yet — directly callable Python function; a future Temporal activity_stage_activity is the intended caller"
+    model_runtime: Claude Agent SDK, LiteLLM-routed — every role (fan-out candidates, gap candidate, scoring, synthesis, critic) uses the same pinned model id, claude-sonnet-5, the only one litellm/config.yaml guarantees resolves
+    tools_allowed:
+      - Read
+      - Grep
+      - Glob
+    scope: >-
+      Fans out N candidate plans from distinct stated angles (no
+      cross-candidate visibility), scores each for SC-NNN coverage and
+      internal consistency, picks a winner deterministically in Python,
+      synthesizes exactly one plan/tasks/ADR set, runs an independent
+      completeness-critic pass, persists and pushes only the
+      synthesized artifacts, and posts one combined, idempotent-per-attempt
+      PR comment. No Write/Edit/Bash bound to any model call.
+deviations_from_design:
+  - "docs/70-multi-agent-pipeline-design.md §2's per-candidate /speckit-analyze consistency result is replaced by a model-produced ordinal 1-5 internal-consistency rating (FR-005) — /speckit-analyze needs Bash, which this stage keeps unbound to stay LiteLLM-routed and hook-free."
+  - "All N + 3 model calls run inside one in-process function, run_architect_stage(), rather than one Temporal activity per role — N full plan.md blobs would exceed Temporal's workflow-history payload limits if passed between activities."
+  - "No Temporal wiring, no plan_approved/plan_rejected gate, no MAX_PLAN_ATTEMPTS enforcement, no vibe mode, no pr_url producer — all out of scope per specs/004-architect-fanout-judge/plan.md's Assumptions."
+eval_gate: >-
+  Not automatically gated. eval/braintrust/eval.config.py::run_eval is a
+  Build-stage gate (sandbox exit_code==0, an opened PR, >=1 parsed
+  SC-NNN) — this stage produces none of those facts. The
+  completeness-critic is advisory with exactly one retry, never
+  blocking. Also unreachable for the same pre-existing reason 003
+  flagged: orchestration/activities.py::eval_gate_activity resolves its
+  spec via sorted(glob("specs/*/spec.md"))[0].
+sandbox: >-
+  No E2B sandbox for any of the three roles (docs/70-multi-agent-pipeline-design.md
+  §6.1 carve-out) — candidates, judge, and critic only ever produce and
+  consume markdown, so there is nothing to execute.
