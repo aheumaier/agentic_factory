@@ -7,6 +7,13 @@ itself hasn't shifted, only which internal edges are live has (see
 below mark integrations that are configured/built but never actually
 called.
 
+**Scope note:** the boundary drawn here is the *foundation* tier only
+(`agent-factory-architecture.md` §1.1) — the system that builds and ships
+agent workers. The SDLC pipeline those workers run inside
+(`docs/70-multi-agent-pipeline-design.md`), which is what actually talks to
+a target repo's PR thread via a GitHub App, is a separate context one
+level up, not yet diagrammed at this level.
+
 ```mermaid
 flowchart TB
     author["<<Person>>\nSpec Author /\nPlatform Engineer"]:::person

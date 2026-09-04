@@ -4,9 +4,14 @@
 
 ### 1.1 What "agent factory" means
 
-An **agent factory** is a system that turns an agent specification into a deployed, monitored, versioned agent — repeatably, for many agents, without a human re-wiring the pipeline each time. The unit of output is not "an answer" but a *running agent* with an identity, a version, a rollback path, and eval evidence attached to it.
+This document describes two tiers, not one, and the rest of the doc is scoped to the first:
 
-It is explicitly **not**:
+- **The agent factory (this doc's subject).** A system that turns an agent specification into a deployed, monitored, versioned *agent worker* — repeatably, for many agent workers, without a human re-wiring the pipeline each time. The unit of output at this tier is not "an answer" but a *running agent* (`swe-agent`, `pm-agent`, and the planned `architect-agent`) with an identity, a version, a rollback path, and eval evidence attached to it. §§1.2–3.8 below are entirely about this tier — building and shipping the workers.
+- **The SDLC pipeline (the factory's product, one level up).** Those agent workers don't sit idle once shipped — they run inside a separate, higher-level pipeline (`docs/70-multi-agent-pipeline-design.md`) that takes a spec through PM review, architecture, build, quality gate, automated review, and security review, entirely via a GitHub App/webhook control plane. *That* pipeline's unit of output is a **merged pull request — a shipped code change in a target repo** — not a deployed agent. The agent factory is this pipeline's foundation, not its product: it's how the PM-agent, architect-agent, and swe-agent workers the pipeline calls at each stage get built and versioned in the first place.
+
+Conflating the two produces a real bug, not just a naming issue: `AgentPipelineWorkflow` today ends every run in `register_activity`, writing `registry/agents/<agent_name>/manifest.yaml` — the agent-factory tier's terminus, grafted onto a run whose actual work is the SDLC-pipeline tier's (building one feature in one target repo). The registry should version the agent *workers* (`swe-agent`, `pm-agent`, `architect-agent`), not the *features* those workers happen to ship — `register_activity`'s current call site is a known mismatch, not yet fixed in code (tracked alongside `specs/005-pipeline-mode-signals-escalation`).
+
+The agent factory, in isolation, is explicitly **not**:
 - **A single agent.** One Claude Agent SDK (software development kit) app with a system prompt and some tools is a product, not a factory. A factory is the thing that built it, tested it, and can build the next fifty like it.
 - **A multi-agent framework.** LangGraph, CrewAI, and the Claude Agent SDK are *harness/runtime* components (§3.2) — they define how one agent (or a graph of agents) executes. A factory sits a level above: it decides which harness a spec compiles to, runs the harness in a sandbox, gates it through evals, and ships it. A framework has no opinion on intake, gating, or retirement; a factory must.
 - **An internal dev tool / script collection.** A folder of prompt templates and a deploy script is *assemble-only* infrastructure with no lifecycle guarantees — no registry, no eval gate, no rollback. It becomes a factory only once those guarantees are enforced structurally, not by convention.
@@ -45,6 +50,8 @@ It is explicitly **not**:
 
 This crosswalk produces the document's central claim: **the factory's two ends — spec intake and the deployment/lifecycle registry — sit on exactly the PDF's assemble-only layers, while the middle of the pipeline is buyable.** `[PDF]` "The assemble-only layers are also the differentiating ones... they encode how your organisation decides, works and knows." That is not incidental — a factory's competitive value lives in the parts nobody can buy: how it decides what to build (intake/triage) and how it governs what it has built (the registry, the skill catalog). The buyable middle (orchestration, sandboxing, model routing, harness, evals) should be bought, because building it yourself only recreates a commodity at greater cost and slower iteration.
 
+The same claim holds one tier up, at the SDLC pipeline (§1.1) this factory is the foundation for. There, the differentiating, assemble-only layer isn't intake or a registry — it's the **gate chain**: PM's value-judgment writeup, the architect fan-out-and-judge panel, the quality gate, and the security-clearance sign-off (`docs/70-multi-agent-pipeline-design.md` §2, §4). Nobody sells "is this PR ready to ship" any more than the PDF's layer 3 sells intent/urgency triage — it's the same assemble-only shape, restated at the pipeline's own promotion boundary instead of the factory's. The GitHub-comment control plane (`orchestration/webhook_bridge/`, §3.1 below) that carries every one of those gate decisions is the pipeline's other differentiating piece, for the same reason spec intake is this doc's: it's where an organisation's own judgment enters the system.
+
 ### 1.4 Outcome specification
 
 A working agent factory produces **deployed, versioned agents that pass a defined quality bar, at a knowable cost, faster over time as components are reused.** Success is measured by:
@@ -55,6 +62,12 @@ A working agent factory produces **deployed, versioned agents that pass a define
 - **Cost per agent-run.** `[PDF]` anchored against sandbox pricing (~$0.05/vCPU-hour) and action-metered platform pricing (~$0.10/action on Salesforce Flex Credits) as external reference points, so a factory-produced agent's run cost can be sanity-checked against buy-side alternatives.
 - **Component reuse rate.** Share of a new agent's harness/tool/skill components pulled from the existing catalog vs. built fresh. Rationale: this is the factory's compounding-return metric — it should rise release over release, or the factory is not actually a factory, just a slower way to hand-write agents.
 - **Rollback / retirement latency.** Time to pull a bad agent version from production and time to fully retire an unused one. Rationale: `[PDF]` this whole layer is assemble-only everywhere, so it gets no vendor SLA (service-level agreement) by default — the factory must instrument it itself or it will not know this number until an incident forces the question.
+
+The six metrics above are all foundation-tier — they measure the factory that builds agent workers. The SDLC pipeline those workers run inside (§1.1) has its own, distinct success measures, since its unit of output is a merged PR, not a deployed agent:
+
+- **Spec-to-merged-PR lead time.** Wall-clock from an accepted `specs/NNN-slug/spec.md` to a human-merged target-repo PR. This is the pipeline's throughput metric, parallel to the foundation tier's spec-to-deployed-agent lead time above, but measured at the feature level.
+- **Per-stage gate pass rate.** Share of runs that clear each blocking gate (PM Spec-Review, Plan-Review, Quality-Gate, Security-Review) on the first attempt vs. requiring a human-rejected retry — per `docs/70-multi-agent-pipeline-design.md` §4's contract table.
+- **Human corrections per run.** Count of human `*_rejected` signals (PM, plan, security) plus blocking automated-review findings across one pipeline run. `docs/70` §10's fully-worked walkthrough hits five corrections in one `full`-mode run — that's a concrete current baseline to track against, not a target to hit.
 
 ## 2. Process Flow
 
@@ -93,7 +106,7 @@ Each Phase 2 process step maps to one layer below and the building block chosen 
 
 | Process step (§2) | Factory layer | Chosen block |
 |---|---|---|
-| Spec Intake | Spec/Intake (§3.1) | Composio/Nango (transport) + Slack/Teams + HumanLayer/gotoHuman (touchpoint) + bespoke schema/triage |
+| Spec Intake | Spec/Intake (§3.1) | GitHub App (transport + touchpoint + approval, via `orchestration/webhook_bridge/`) + GitHub Spec Kit (schema/triage) — supersedes this doc's original Composio/Nango + Slack/Teams + HumanLayer/gotoHuman choice |
 | Build | Harness/Runtime (§3.2) | Claude Agent SDK |
 | Sandbox Test | Execution Sandbox (§3.3) | E2B |
 | (every model call, throughout) | Inference Routing (§3.4) | LiteLLM (self-hosted) |
@@ -106,15 +119,17 @@ Each Phase 2 process step maps to one layer below and the building block chosen 
 
 **Purpose:** Convert an unstructured request ("we need an agent for X") into a structured, versioned spec the rest of the pipeline can act on deterministically. This layer spans three PDF layers, not one, and each has a different verdict.
 
-**Chosen building blocks — three parts:**
+**Superseded design, current reality:** the original three-vendor split below (Composio/Nango transport + Slack/Teams touchpoint + HumanLayer/gotoHuman approval) was this doc's first-pass answer, before this repo had a real intake surface. It never shipped, and it isn't the plan anymore — `docs/00-status.md` already marks it "Superseded." What's actually built collapses transport, touchpoint, *and* approval into one building block: a **GitHub App**, acting as a persistent webhook subscriber (`orchestration/webhook_bridge/`, `docs/70-multi-agent-pipeline-design.md` §1.1) rather than a CI-triggered script. A raw request arrives as a GitHub issue or PR comment (transport = touchpoint, no separate chat surface needed); every human sign-off in the pipeline — spec acceptance, plan approval, security clearance — is a PR comment the same App parses and turns into a Temporal signal (approval, same channel). The three-vendor split the paragraphs below describe is kept only as a record of the reasoning that was superseded, not as the current chosen block — see the mapping table above for what's actually wired.
+
+**Chosen building blocks — three parts (superseded, see above):**
 
 - **Transport (buyable):** `[PDF]` Layer 1, Connectors, is rated "Buy the transport, build the schema" — Composio, Nango, Merge.dev, Paragon, Airbyte, Hookdeck, and Svix are named as mature options for getting a request (a ticket, a form submission, a webhook) into the factory. Composio is the reference pick here specifically because it also appears in the PDF's Tools & Integrations registry (layer 8), so the same connector layer that brings a spec in can later expose the finished agent's tools out — one less integration to maintain.
 - **Touchpoint (emerging, buyable):** `[PDF]` Layer 2, Interaction, is "Emerging" — Slack/Teams-native surfaces are named as mature enough to use today. The reference design puts spec submission in the requester's existing chat surface (Slack or Teams) rather than a bespoke intake form, and routes the acceptance decision through HumanLayer or gotoHuman — both `[PDF]`-named for "approval touchpoints" — so a human sign-off on the spec is a first-class, auditable step rather than an informal Slack thread.
-- **Schema + triage (assemble-only):** `[PDF]` Layer 3, Interaction Intelligence, is assemble-only market-wide — "intent/urgency triage is fine-tune-it-yourself," and even the best-positioned vendor (ServiceNow, via its Moveworks acquisition) sells triage only as part of a locked-in suite, not standalone. No product decides *whether this spec is worth building*. The reference approach is a structured template (goal, inputs/outputs, allowed tools, guardrail policy, owner, acceptance tests) stored as a spec file in the same repository as the agent's eventual skill definitions, with the accept/escalate rule encoded as an explicit, versioned policy rather than left to reviewer judgment.
+- **Schema + triage (assemble-only, still current):** `[PDF]` Layer 3, Interaction Intelligence, is assemble-only market-wide — "intent/urgency triage is fine-tune-it-yourself," and even the best-positioned vendor (ServiceNow, via its Moveworks acquisition) sells triage only as part of a locked-in suite, not standalone. No product decides *whether this spec is worth building*. This half of the original design held up: GitHub Spec Kit (`.specify/` + `specs/NNN-slug/`) is exactly this structured template (goal, inputs/outputs, tools, guardrails, acceptance tests) stored as a spec file in the same repository as the agent's skill definitions, with `swe-agent`'s `verify_spec_exists()` enforcing the accept/escalate rule at runtime instead of leaving it to reviewer judgment.
 
-**Rationale:** Transport and touchpoint are a straightforward buy — the PDF is explicit that no product differentiates on schema normalization, so building either wins nothing. Triage/schema is where an organisation's own judgment lives, and per §1.3 this is the layer the PDF calls differentiating rather than commoditized — a generic form would under-serve that judgment; a bespoke, versioned one encodes it.
+**Rationale:** Why the transport/touchpoint half changed: a GitHub App wins on the same "buy the transport, don't build a bespoke one" logic the PDF applies to Composio/Nango — except here the "vendor" is GitHub itself, already the system of record for the issues/PRs this pipeline acts on, so routing intake and every approval through it needs no second integration surface at all. Schema/triage is still where an organisation's own judgment lives, and per §1.3 this is the layer both the foundation tier and the SDLC-pipeline tier treat as differentiating rather than commoditized.
 
-**Inputs/Outputs:** Input: a raw request arriving via the transport/touchpoint layer (ticket, chat message, product brief). Output: a structured, triaged spec artifact consumed by Build.
+**Inputs/Outputs:** Input: a raw request arriving via the GitHub App (issue, PR comment). Output: a structured, triaged spec artifact (`specs/NNN-slug/spec.md`) consumed by Build.
 
 ### 3.2 Harness/Runtime
 

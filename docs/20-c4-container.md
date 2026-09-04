@@ -1,5 +1,11 @@
 # C4 Level 2 — Containers
 
+**Scope note:** "the 8 layers" below are the foundation tier
+(`agent-factory-architecture.md` §1.1) — containers for building/shipping
+agent workers, not the SDLC pipeline that runs them
+(`docs/70-multi-agent-pipeline-design.md`), which has no container diagram
+here yet.
+
 Two diagrams, deliberately not one: collapsing "designed" and "as built"
 into a single diagram at this granularity would either omit the LiteLLM
 bypass or bury it in a footnote, and that bypass is one of the most

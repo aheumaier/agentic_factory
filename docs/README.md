@@ -3,10 +3,10 @@
 This directory **supplements** the two root design docs — it does not replace
 them and does not re-derive their rationale:
 
-- [`agent-factory-architecture.md`](../agent-factory-architecture.md) — the
+- [`agent-factory-architecture.md`](./agent-factory-architecture.md) — the
   8-layer factory design, why each building block was picked (buy vs.
   assemble-only per layer, §1–§4).
-- [`agent-swe-design.md`](../agent-swe-design.md) — one factory output in
+- [`agent-swe-design.md`](./agent-swe-design.md) — one factory output in
   full: the `swe-agent` spec (scope, triggers, tool access, workflow,
   guardrails, eval criteria, failure handling).
 
@@ -25,7 +25,7 @@ back to a `§N.M` section instead of re-explaining it.
 | 5 | [`40-sequence-swe-agent-runtime.md`](./40-sequence-swe-agent-runtime.md) | Runtime trace of a real `swe-agent` run, and what's missing vs. its own design doc. |
 | 6 | [`50-pipeline-flow-gap-analysis.md`](./50-pipeline-flow-gap-analysis.md) | The factory's own §2 process flow, status-colored end to end. |
 | 7 | [`60-best-practices.md`](./60-best-practices.md) | Per-layer "definition of done" checklists, conventions to replicate, open risks. |
-| 8 | [`70-multi-agent-pipeline-design.md`](./70-multi-agent-pipeline-design.md) | **Design proposal, not built.** Extends `AgentPipelineWorkflow` into a full multi-stage SDLC pipeline — PM review, architect judge-panel, quality gate, automated/security review, human approval gates. |
+| 8 | [`70-multi-agent-pipeline-design.md`](./70-multi-agent-pipeline-design.md) | **The product narrative — not built yet.** Per `agent-factory-architecture.md` §1.1, this is what the repo is actually for: a full multi-stage SDLC pipeline (PM review, architect judge-panel, build, quality gate, automated/security review, human approval gates) whose output is a merged target-repo PR, running on top of the 8-layer foundation described in files 1-7 above. |
 
 No C4 **Level 4 (Code)** page — out of scope at this codebase's current
 size; the one container worth decomposing that far (`swe-agent`) is fully
