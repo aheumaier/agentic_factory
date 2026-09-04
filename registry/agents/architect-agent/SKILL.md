@@ -99,27 +99,47 @@ and the function is given no checkout to derive it from. `agent.py`
 adds a required keyword-only `sha: str` argument; `run_architect_stage()`
 passes the commit SHA from `persist_synthesized()`.
 
+## Temporal wiring (narrow slice of 005)
+
+`orchestration/activities.py::architect_stage_activity` wraps
+`run_architect_stage()` in-process (no E2B sandbox, per the carve-out
+above), mapping its two named exception cases onto typed, non-retryable
+`ApplicationError`s so the workflow branches on `.type` rather than
+string-matching: `MalformedRetriesExhausted` (CO-3 — never charges the
+plan-attempt budget) and `PlanDeterministicFailure` (CO-2 — always
+charges it). `ensure_target_pr_activity` opens the target-repo PR ahead of
+this stage (see "No standalone `pr_url` producer" below). `AgentPipelineWorkflow`
+(`orchestration/workflows/pipeline_workflow.py`) runs this stage ahead of
+Build behind a `workflow.patched("architect-stage-v1")` guard, gated by
+real `plan_approved`/`plan_rejected(feedback)` signals, and discharges
+CO-1/CO-2/CO-3/CO-4 against a `MAX_PLAN_ATTEMPTS=3` budget. Covered by
+`orchestration/tests/test_pipeline_workflow.py`.
+
+Still deliberately out of scope, left for a full
+`specs/005-pipeline-mode-signals-escalation/` pass: the `mode` param and
+`vibe` mode itself, PM Spec-Review's own activity/signal wiring, the
+security-clearance signal, and the generic `escalation_resume`/
+`escalation_abandon(reason)` pair — this slice's budget exhaustion still
+raises a bare `ApplicationError`, exactly like the existing Build loop's,
+not yet generalized into that pair. The full FR-015 re-sequence (Setup +
+PM gate + Architect + Completeness-Critic all ahead of Build) also isn't
+done — only the Architect stage moved.
+
 ## Known gaps
 
-- **No Temporal wiring.** No `architect_stage_activity` in
-  `orchestration/activities.py`, no new step in
-  `orchestration/workflows/pipeline_workflow.py`. Directly callable,
-  testable functions only — the same place `003-pm-agent-review-gate`
-  ended.
-- **No `plan_approved`/`plan_rejected` gate.** Signal delivery belongs to
-  `specs/002-webhook-trigger-bridge/` (parsing) and
-  `specs/005-pipeline-mode-signals-escalation/` (the `@workflow.signal`
-  handlers, which do not exist yet).
-- **`MAX_PLAN_ATTEMPTS` is not named or enforced here** — deliberately.
-  `specs/005-pipeline-mode-signals-escalation/` owns it, including the
-  Consumer obligations (CO-1 through CO-4) listed in
-  `contracts/architect-agent-interface.md` that the future caller must
-  implement for FR-010/FR-013/FR-013a/FR-013b to actually hold anywhere.
+- **`MAX_PLAN_ATTEMPTS` charging is duplicated, not shared, across
+  gated stages** — deliberately, for now. The plan-review loop above
+  enforces its own `MAX_PLAN_ATTEMPTS=3` budget; a generic, cross-stage
+  escalation mechanism (`escalation_resume`/`escalation_abandon`) that
+  the PM and Security stages would also plug into is still
+  `specs/005-pipeline-mode-signals-escalation/`'s job.
 - **No `vibe` mode.** `candidate_count()` accepts an `n_override`, the
   seam a future `vibe` caller uses, but this feature does not add the
   mode itself.
-- **No `pr_url` producer.** Like `review_spec()`, this stage takes
-  `pr_url` as an argument and assumes a target-repo PR already exists.
+- **No standalone `pr_url` producer.** `run_architect_stage()` itself
+  still just takes `pr_url` as an argument, unchanged. The narrow
+  Temporal slice above provides one via `ensure_target_pr_activity`, but
+  `review_spec()` (pm-agent) has no equivalent yet.
 - **This stage is not automatically gated.** See
   `registry/agents/architect-agent/manifest.yaml`'s `eval_gate` field and
   `specs/004-architect-fanout-judge/plan.md`'s "This stage is not

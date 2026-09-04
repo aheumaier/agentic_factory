@@ -12,9 +12,12 @@ from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
+import asyncio
+
 import yaml
 from e2b import AsyncSandbox
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 # Mirrors harness/swe-agent/agent.py's own _REPO_RE/_BRANCH_RE: repo/branch
 # are workflow inputs threaded into a shell command run inside the sandbox
@@ -110,6 +113,17 @@ _eval_config = _load_module_by_path(
     Path(__file__).resolve().parent.parent / "eval" / "braintrust" / "eval.config.py",
 )
 
+_architect_agent = _load_module_by_path(
+    "architect_agent",
+    Path(__file__).resolve().parent.parent / "harness" / "architect-agent" / "agent.py",
+)
+
+# Coarse heartbeat for architect_stage_activity: run_architect_stage() has no
+# internal heartbeat hook (it's one in-process call, not a sandboxed run), so
+# this timer is the only way Temporal can tell a slow N-candidate fan-out
+# apart from a hung one.
+_HEARTBEAT_INTERVAL_SECONDS = 30
+
 
 @activity.defn
 async def eval_gate_activity(repo: str, branch: str, sandbox_trace: dict) -> dict:
@@ -133,6 +147,80 @@ async def eval_gate_activity(repo: str, branch: str, sandbox_trace: dict) -> dic
                 "reason": "no specs/*/spec.md found on branch",
             }
         return _eval_config.run_eval(str(specs[0]), sandbox_trace)
+
+
+@activity.defn
+async def ensure_target_pr_activity(repo: str, branch: str) -> str:
+    """Opens (or finds) the PR on the *target* repo (`repo`) that the
+    architect stage and Build both need to agree on one `pr_url` for.
+    Precondition: `branch` already exists and is pushed on `repo` — Spec
+    Intake (§3.1, manual today) is what puts specs/*/spec.md there.
+    Idempotent — safe to retry, and safe for harness/swe-agent/agent.py's
+    later `gh pr create` to run again afterward, since that call already
+    tolerates an "already exists" failure and reuses the PR."""
+    _validate_target(repo, branch)
+    existing = _open_pr_url(repo, branch)
+    if existing:
+        return existing
+    try:
+        return _run(
+            [
+                "gh", "pr", "create",
+                "--repo", repo,
+                "--head", branch,
+                "--title", f"[{branch}] automated pipeline run",
+                "--body", "Opened by ensure_target_pr_activity ahead of the architect stage.",
+            ]
+        )
+    except RuntimeError:
+        existing = _open_pr_url(repo, branch)
+        if existing:
+            return existing
+        raise
+
+
+@activity.defn
+async def architect_stage_activity(
+    repo: str, branch: str, pr_url: str, attempt: int, feedback: str | None = None,
+) -> dict:
+    """Architect fan-out/judge stage (004), run in-process — no E2B sandbox
+    for this stage, per its own design carve-out (§6.1). Maps the two
+    exception cases run_architect_stage() can raise onto typed,
+    non-retryable ApplicationErrors so the workflow can branch on `.type`
+    instead of string-matching a caught exception itself:
+      - MalformedRetriesExhausted: all fan-out candidates came back
+        malformed even after a retry (CO-3) — must NOT charge the caller's
+        plan-attempt budget.
+      - PlanDeterministicFailure: any other ValueError/RuntimeError from
+        the stage (CO-2) — the caller charges its plan-attempt budget.
+    Anything else (e.g. a transient git/gh CalledProcessError) propagates
+    raw for the workflow's _TRANSIENT_RETRY policy to retry."""
+    _validate_target(repo, branch)
+
+    async def _heartbeat() -> None:
+        while True:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+            activity.heartbeat()
+
+    heartbeat_task = asyncio.ensure_future(_heartbeat())
+    try:
+        return await _architect_agent.run_architect_stage(
+            repo, branch, pr_url, attempt, feedback=feedback,
+        )
+    except RuntimeError as e:
+        if "malformed" in str(e).lower():
+            raise ApplicationError(
+                str(e), type="MalformedRetriesExhausted", non_retryable=True
+            ) from e
+        raise ApplicationError(
+            str(e), type="PlanDeterministicFailure", non_retryable=True
+        ) from e
+    except ValueError as e:
+        raise ApplicationError(
+            str(e), type="PlanDeterministicFailure", non_retryable=True
+        ) from e
+    finally:
+        heartbeat_task.cancel()
 
 
 def _factory_repo() -> str:

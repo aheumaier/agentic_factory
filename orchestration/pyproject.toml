@@ -5,9 +5,11 @@ requires-python = ">=3.11"
 dependencies = [
     "aiohttp",              # webhook_bridge's HTTP server (specs/002-webhook-trigger-bridge)
     "braintrust>=0.36.0",  # imported by eval.config.py, which activities.py loads (§3.6)
+    "claude-agent-sdk",     # imported by harness/architect-agent/agent.py, which activities.py loads (004)
     "cryptography",         # RS256 key handling for the GitHub App JWT (webhook_bridge/github_app.py)
     "e2b",                 # Execution Sandbox the SWE-agent activity runs in (§3.3)
     "pyjwt",                # GitHub App JWT signing (webhook_bridge/github_app.py)
+    "python-dotenv",        # imported by harness/architect-agent/agent.py, which activities.py loads (004)
     "pyyaml",              # registry manifest/version files the Register activity writes (§3.7)
     "temporalio>=1.32.0",  # floor pinned to the version uv.lock already resolves (research.md/H6)
 ]

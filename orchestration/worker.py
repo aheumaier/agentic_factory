@@ -8,6 +8,8 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from activities import (
+    architect_stage_activity,
+    ensure_target_pr_activity,
     eval_gate_activity,
     promote_agent_activity,
     register_activity,
@@ -26,6 +28,8 @@ async def main() -> None:
         task_queue=TASK_QUEUE,
         workflows=[AgentPipelineWorkflow, RegistryPromotionWaiterWorkflow],
         activities=[
+            ensure_target_pr_activity,
+            architect_stage_activity,
             run_swe_agent_activity,
             eval_gate_activity,
             register_activity,
