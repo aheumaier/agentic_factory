@@ -62,3 +62,14 @@ the fastest way to check what might already be stale again — Deploy
 (`promote_agent_activity`) being unreachable and the GitHub-comment
 trigger path having no Gate/Register/Deploy step are the two facts most
 likely to change next.
+
+As of the pass that landed `harness/architect-agent/agent.py` (spec
+`004-architect-fanout-judge`, merged to `main` at commit `f8464bb`),
+`00-status.md` and `70-multi-agent-pipeline-design.md`'s diagram (a)
+reflect it: `run_architect_stage()` (fan-out → SC-NNN coverage/consistency
+scoring → synthesis → one-round completeness-critic → persist/push → an
+idempotent-per-attempt PR comment) is real, directly-callable code, colored
+**partial** — same as `DeployWaiter` — because nothing in
+`orchestration/workflows/pipeline_workflow.py` registers or calls it yet.
+That Temporal wiring, plus the `plan_approved`/`plan_rejected` gate signal,
+is `005-pipeline-mode-signals-escalation`'s job, not this pass's.

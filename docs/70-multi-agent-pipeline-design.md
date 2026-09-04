@@ -359,15 +359,24 @@ stateDiagram-v2
     classDef real fill:#1a7f37,stroke:#1a7f37,color:#fff
     classDef partial fill:#9a6700,stroke:#9a6700,color:#fff,stroke-dasharray: 4 3
     classDef stub fill:#6e7781,stroke:#6e7781,color:#fff,stroke-dasharray: 2 2
-    class IssueShaping,EnsureTargetPR,PMSpecReview,PMGate,ArchitectFanOut,ArchitectJudge,CompletenessCritic,PlanGate,Simplify,QualityGate,AutomatedReview,SecurityReview,SecurityGate,Escalate stub
+    class IssueShaping,EnsureTargetPR,PMSpecReview,PMGate,PlanGate,Simplify,QualityGate,AutomatedReview,SecurityReview,SecurityGate,Escalate stub
     class Build,EvalGate,Register real
-    class DeployWaiter partial
+    class DeployWaiter,ArchitectFanOut,ArchitectJudge,CompletenessCritic partial
 ```
 
 Coloring follows `docs/README.md`'s status legend: green = real, orange
 dashed = partial, gray dashed = stub. `Build`/`EvalGate`/`Register` are
-real; `DeployWaiter` is partial (code-complete, unreachable); every other
-node is a design-only stage.
+real; `DeployWaiter` is partial (code-complete, unreachable);
+`ArchitectFanOut`/`ArchitectJudge`/`CompletenessCritic` are partial too —
+`harness/architect-agent/agent.py::run_architect_stage()` (spec
+`004-architect-fanout-judge`) implements fan-out, scoring, synthesis, and
+the one-round completeness-critic as a directly callable function, but it
+is not registered as a Temporal activity and nothing in
+`orchestration/workflows/pipeline_workflow.py` calls it — same
+code-complete/unreachable shape as `DeployWaiter`. `PlanGate` stays stub:
+no `@workflow.signal` handler for `plan_approved`/`plan_rejected` exists
+yet (`005-pipeline-mode-signals-escalation`'s job). Every other node is a
+design-only stage.
 
 ## 4. Per-stage contract table
 
