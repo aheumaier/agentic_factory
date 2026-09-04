@@ -10,3 +10,6 @@ markdown-lsp-0.1.3/
 # Added by Braintrust Wizard
 .env.braintrust
 .braintrust.json
+
+# opencode CLI local state
+.opencode/

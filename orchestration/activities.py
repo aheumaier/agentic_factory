@@ -76,7 +76,7 @@ async def run_swe_agent_activity(repo: str, branch: str, feedback: str | None = 
         template=_SANDBOX_TEMPLATE,
         timeout=_SANDBOX_TIMEOUT_SECONDS,
         envs={
-            "ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"],
+            "ANTHROPIC_PLATFORM_API_KEY": os.environ["ANTHROPIC_PLATFORM_API_KEY"],
             "GH_TOKEN": os.environ["GH_TOKEN"],
         },
     )

@@ -58,12 +58,12 @@ jobs:
         id: sandbox
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_PLATFORM_API_KEY: ${{ secrets.ANTHROPIC_PLATFORM_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           out="$(npx --yes @e2b/cli sandbox create swe-agent-sandbox -d --timeout 900 \
-            -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+            -e ANTHROPIC_PLATFORM_API_KEY="$ANTHROPIC_PLATFORM_API_KEY" \
             -e GH_TOKEN="$GH_TOKEN")"
           echo "$out"
           # The CLI prints prose, not JSON: take the last id-shaped token.
@@ -77,14 +77,14 @@ jobs:
         continue-on-error: true
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_PLATFORM_API_KEY: ${{ secrets.ANTHROPIC_PLATFORM_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: ${{ steps.pr.outputs.branch }}
           SANDBOX_ID: ${{ steps.sandbox.outputs.id }}
         run: |
           set -euo pipefail
           npx --yes @e2b/cli sandbox exec \
-            -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+            -e ANTHROPIC_PLATFORM_API_KEY="$ANTHROPIC_PLATFORM_API_KEY" \
             -e GH_TOKEN="$GH_TOKEN" \
             "$SANDBOX_ID" \
             -- python3 /app/agent.py "$REPO" "$BRANCH" \

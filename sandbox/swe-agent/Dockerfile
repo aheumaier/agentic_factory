@@ -20,6 +20,6 @@ RUN pip install --no-cache-dir "braintrust>=0.36.0" claude-agent-sdk
 
 COPY harness/swe-agent/agent.py ./agent.py
 
-# ANTHROPIC_API_KEY and GH_TOKEN are passed as sandbox env vars at
+# ANTHROPIC_PLATFORM_API_KEY and GH_TOKEN are passed as sandbox env vars at
 # creation time (see .github/workflows/swe-agent-build.yml), never baked
 # into the image.

@@ -70,7 +70,7 @@ services:
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_PLATFORM_API_KEY: ${ANTHROPIC_PLATFORM_API_KEY}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-master}
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     ports:

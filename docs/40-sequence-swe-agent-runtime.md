@@ -35,7 +35,7 @@ sequenceDiagram
 
     loop up to MAX_BUILD_ATTEMPTS=3
         W->>AC: execute_activity(repo, branch, feedback)
-        AC->>E2B: AsyncSandbox.create(template=swe-agent-sandbox,\nenvs: ANTHROPIC_API_KEY, GH_TOKEN)
+        AC->>E2B: AsyncSandbox.create(template=swe-agent-sandbox,\nenvs: ANTHROPIC_PLATFORM_API_KEY, GH_TOKEN)
         E2B->>A: python3 agent.py {repo} {branch} [feedback]
         Note over A: braintrust.init_logger() +\nauto_instrument() at import time
         A->>G: clone https://x-access-token:{GH_TOKEN}@github.com/{repo}.git
@@ -80,13 +80,13 @@ nothing in the diagram above ever starts or signals that workflow.
 
 ## What's missing vs. the designed workflow
 
-| Designed (`agent-swe-design.md` §5, §8) | Actual |
-|---|---|
-| Test-first: write a failing test before implementing | Not enforced by `agent.py` — delegated entirely to the model following `/speckit-implement`'s own conventions; no code-level check that a new test was added |
-| Local verification (full suite + lint + typecheck) as an explicit step | Folded into the model's own responsibility inside the `IMPLEMENT_PROMPT` turn — no separate `agent.py` step re-runs it afterward |
-| Self-review diff against scope | Not implemented — no scope-diff step exists between commit and push |
-| Push branch, wait for CI, retry loop (§8, default N=3) | **Partially exists, but not for CI.** `pipeline_workflow.py` now loops Build→Eval-Gate up to `MAX_BUILD_ATTEMPTS=3`, feeding the gate's failure `reason` back into `agent.py` as a `feedback` argument appended to `IMPLEMENT_PROMPT`. This re-enters on a **failed Eval-Gate** (binary coverage check), not on a failing target-repo CI run — nothing polls the target repo's CI status at all |
-| Reviewer-requests-changes re-entry | Still not implemented — the agent's job ends at `verify_pr_exists()`; a human's PR review comment has no path back into `agent.py` |
+| Designed (`agent-swe-design.md` §5, §8)                                | Actual                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Test-first: write a failing test before implementing                   | Not enforced by `agent.py` — delegated entirely to the model following `/speckit-implement`'s own conventions; no code-level check that a new test was added                                                                                                                                                                                                                                    |
+| Local verification (full suite + lint + typecheck) as an explicit step | Folded into the model's own responsibility inside the `IMPLEMENT_PROMPT` turn — no separate `agent.py` step re-runs it afterward                                                                                                                                                                                                                                                                |
+| Self-review diff against scope                                         | Not implemented — no scope-diff step exists between commit and push                                                                                                                                                                                                                                                                                                                             |
+| Push branch, wait for CI, retry loop (§8, default N=3)                 | **Partially exists, but not for CI.** `pipeline_workflow.py` now loops Build→Eval-Gate up to `MAX_BUILD_ATTEMPTS=3`, feeding the gate's failure `reason` back into `agent.py` as a `feedback` argument appended to `IMPLEMENT_PROMPT`. This re-enters on a **failed Eval-Gate** (binary coverage check), not on a failing target-repo CI run — nothing polls the target repo's CI status at all |
+| Reviewer-requests-changes re-entry                                     | Still not implemented — the agent's job ends at `verify_pr_exists()`; a human's PR review comment has no path back into `agent.py`                                                                                                                                                                                                                                                              |
 
 The single most consequential remaining gap: **there is still no re-entry
 path driven by the target repo's own CI or human review.** The new

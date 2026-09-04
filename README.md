@@ -8,21 +8,21 @@ no self-host tier and run on their free plans at this volume).
 
 ## Layer -> directory
 
-| Layer | Dir | Building block |
-|---|---|---|
-| Spec/Intake | `.specify/` + `specs/` | GitHub Spec Kit (official; old bespoke `spec/` schema/triage-policy retired) |
-| Harness/Runtime | `harness/` | Claude Agent SDK (Python) |
-| Execution Sandbox | `sandbox/` | E2B |
-| Inference Routing | `litellm/` | LiteLLM proxy (self-hosted) |
-| Orchestration | `orchestration/` | Temporal (self-hosted) |
-| Eval/Gating | `eval/` | Braintrust + Langfuse |
-| Deployment/Lifecycle | `registry/` | git-backed catalog + CI gate |
-| Observability | `observability/` | Langfuse (self-hosted) |
+| Layer                | Dir                    | Building block                                                               |
+| -------------------- | ---------------------- | ---------------------------------------------------------------------------- |
+| Spec/Intake          | `.specify/` + `specs/` | GitHub Spec Kit (official; old bespoke `spec/` schema/triage-policy retired) |
+| Harness/Runtime      | `harness/`             | Claude Agent SDK (Python)                                                    |
+| Execution Sandbox    | `sandbox/`             | E2B                                                                          |
+| Inference Routing    | `litellm/`             | LiteLLM proxy (self-hosted)                                                  |
+| Orchestration        | `orchestration/`       | Temporal (self-hosted); `webhook_bridge/` relays GitHub PR comments to `AgentPipelineWorkflow` (specs/002-webhook-trigger-bridge) |
+| Eval/Gating          | `eval/`                | Braintrust + Langfuse                                                        |
+| Deployment/Lifecycle | `registry/`            | git-backed catalog + CI gate                                                 |
+| Observability        | `observability/`       | Langfuse (self-hosted)                                                       |
 
 ## Local infra
 
 ```
-cp .env.example .env   # fill in ANTHROPIC_API_KEY etc.
+cp .env.example .env   # fill in ANTHROPIC_PLATFORM_API_KEY etc.
 docker compose up -d   # temporal, postgres, langfuse, clickhouse, litellm
 ```
 
