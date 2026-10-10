@@ -91,6 +91,24 @@ The reviewer's test gap "a past reset counts as one wait" is now covered by a te
 
 **Deploy note:** terminate or restart any existing long-lived `credential-pool` workflow before deploying 011 (research R3). On 2026-10-10 none exists on the local server.
 
-### V5 re-run
+### V5 re-run 3 (2026-10-10, 21:34–21:46 UTC): mechanics pass, mid-task resume **not shown**
 
-Pending.
+Target `aheumaier/pm-agent-scratch-test`, branch `v5-seat-handoff-3` (fixture `c1deff6`, cut from `fe87416`). Pool `credential-pool-v5b` (two logical seats on seat-a's token). Worker env: `SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS=1`, `SEAT_GUARD_FORCE_EXHAUST_HANDOFF=0`. The E2B template was rebuilt from `a8d9f0c`, and the in-sandbox sha256 of `agent.py` and `seat_guard.py` matched the repo.
+
+| Event | Seat | Detail |
+|---|---|---|
+| Architect stage (lease `architect/1/0`) | seat-a | Released with `utilization=0.51` (`seven_day`) and `utilization_resets_at=2026-10-12T19:00:00+00:00`. F2 live: the reading carries its own window's reset. |
+| Build handoff 0 (`build/1/0`, activity arg `handoff=0`) | seat-b | Picked by utilization (0.0 < 0.51) and **forced by handoff index** (F6): `SeatExhausted`. It pushed one commit, `cfaecde checkpoint: T001 T002 T003`, authored by the harness fallback identity `swe-agent` (F1). |
+| `report_seat_failure` | seat-b | `exhausted_until ≈ now+1h`, reading 1.0 with the same reset. |
+| Build handoff 1 (`build/1/1`, `handoff=1`) | seat-a | Every task was `[X]`, so it took the all-done shortcut: no model call, no commit, PR opened. |
+| Eval-Gate, Register | — | Passed. Exactly **one** feature PR: **#6**. |
+
+Secrecy (SC-007): 0 hits for every `.env` secret value and the `sk-ant-oat` prefix in each of: the `v5-seat-handoff-run-3` history, the `credential-pool-v5b` history, the worker log, and all scratch-repo PR comments.
+
+**Why mid-task resume is not shown.** The model implemented all three tasks, then marked all three `[X]` in one edit, despite the prompt's "one task at a time". The harness checkpointed that tick, so nothing was lost: before 011, this depended on the model committing at all. But one tick event can only become one checkpoint. The force hook fired after that one commit, and the successor had nothing left to do. Run 2 of 009 failed the same way, so batching is the model's consistent behavior on this three-task fixture. A prompt instruction does not prevent it.
+
+**What the checkpoint holds.** `cfaecde` changes `tasks.md` (+3/-3), the three `wordstats/*.py` modules, `wordstats/__init__.py` and the three test files. So the model really did implement all three tasks before ticking; it did not tick without working. There is no sandbox transcript to show the order of the edits: the sandbox gets no Braintrust key, and on exit 75 only the status line is kept. That gap is worth closing if per-task behavior needs auditing later.
+
+**Next step:** the operator rules on fork F7 (spec.md, "Open fork F7"). After that, re-run V5 as run 4, from a new fixture branch cut from `fe87416`.
+
+**Side effect during the run (fixed for this session, not in code).** The Stop hook re-ran the orchestration suite because `.handoff/v5/*.py` are untracked `.py` files. Main's `webhook_bridge` e2e test (the leaky version; 010's fix `889785f` is not on main yet) then put `pipeline/owner/repo/demo-widget-1b73f10c/v1` on `agent-factory-pipeline`. The V5 worker ran its `ensure_target_pr_activity`, which failed harmlessly on the fake `owner/repo`, and the test terminated the workflow. To stop a repeat, `.handoff/` was added to `.git/info/exclude` (local only) for the rest of the run.

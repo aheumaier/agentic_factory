@@ -121,11 +121,12 @@
 
 **Independent Test**: quickstart.md V5.
 
-- [ ] T029 [US2] Rebuild the `swe-agent-sandbox` E2B template and verify the sha256 of `/app/agent.py` and `/app/seat_guard.py` against the repo files
+- [X] T029 [US2] Rebuild the `swe-agent-sandbox` E2B template and verify the sha256 of `/app/agent.py` and `/app/seat_guard.py` against the repo files
 - [X] T030 [US2] Cut fixture branch `v5-seat-handoff-3` from scratch-repo commit `fe874169` (rename the spec dir, update feature.json and spec.md) and push it from a temporary clone, with the token redacted
-- [ ] T031 [US2] Check headroom with orchestration/scripts/seat_smoke.py (PASS, utilization below about 0.8); start the worker per quickstart V5 step 4; start the run, approve the plan after checking that tasks.md is a checklist, and wait for completion
+- [X] T031 [US2] Check headroom with orchestration/scripts/seat_smoke.py (PASS, utilization below about 0.8); start the worker per quickstart V5 step 4; start the run, approve the plan after checking that tasks.md is a checklist, and wait for completion
 - [ ] T032 [US2] Run `.handoff/v5/v5_verify.py` (IDs set to `v5-seat-handoff-run-3` and `credential-pool-v5b`) with the worker log; check the pass criteria against the remote branch's commit log; record the results in specs/011-seat-pool-hardening/quickstart.md "Results"
-- [ ] T033 [US2] Stop the worker, terminate `credential-pool-v5b`, and remove the temporary clones
+  - Results are recorded in quickstart.md ("V5 re-run 3"). Pass criteria 1 and 3 are **not met**: the model batched T001–T003 into one tick, so the single checkpoint held all three tasks and the successor had nothing left to resume. This waits on the operator's F7 ruling (spec.md).
+- [X] T033 [US2] Stop the worker, terminate `credential-pool-v5b`, and remove the temporary clones
 
 ---
 

@@ -32,6 +32,16 @@ The six design forks from the handoff prompt (F1–F6). The operator was away (b
 - Q: F5 — Fix the feedback-retry handoff gap, or document it? → A: fix it: the Build run receives its handoff index and skips the "made no new commit" check when it is above 0. The prompt's extra condition "and the branch is ahead of the original start" is dropped, because a successor has no original-start commit without threading one through the exhaustion details; the remaining narrow gap (predecessor pushed nothing *and* successor commits nothing) then surfaces at the Eval-Gate instead of as exit 1. *Agent-decided, to confirm.*
 - Q: F6 — How can the force hook not be routed around? → A: (b) a new setting `SEAT_GUARD_FORCE_EXHAUST_HANDOFF=N` forces whichever seat runs handoff N of the Build stage (possible because F5 delivers the handoff index); the 009 seat-name setting keeps working. Rejected: (a) query `seats()` first and force the seat that will be picked. *Agent-decided, to confirm.*
 
+### Open fork F7, raised by V5 run 3 (2026-10-10, **needs the operator's ruling**)
+
+F1(a) assumes the model ticks one task at a time. The live run shows it doesn't: in 009 run 2 and again in 011 run 3, the model implemented all three tasks and then marked them `[X]` in one edit. The harness saved that work (nothing was lost), but one tick event can only become one checkpoint. So "the successor starts at task 2" (User Story 2, SC-001) cannot be shown on this fixture with F1(a) alone.
+
+- **F7-a (agent's recommendation): drive one task per model session.** The harness loops over the open tasks in order. Each `query()` says "implement only `<ID>`, mark it `[X]`, stop", and the checkpointer commits between sessions. The all-done shortcut and the single-session Gate-feedback retry stay as they are. Costs: N CLI sessions per Build, each re-reading the spec and plan; no shared context between tasks; more seat usage per Build; `/speckit-implement` may still ignore "only T001", so the prompt would name the task, not the skill.
+- **F7-b: change the fixture or the scratch repo's implement skill** (one phase per task, a stronger instruction). Cheap but unreliable, and it proves nothing about production runs.
+- **F7-c: accept tick granularity as the model's.** F1 still guarantees that whatever is ticked survives a handoff. SC-001 of this spec and SC-002 of 009 are then met only for models that tick per task.
+
+Related, for specs 006/008: today's Eval-Gate passes a Build whose diff touches only `tasks.md`, or nothing at all. It should require a non-empty diff beyond `tasks.md`.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Every finished task is saved, whatever the model does (Priority: P1)
