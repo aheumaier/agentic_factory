@@ -196,7 +196,18 @@ def _decision_from_writeup(writeup: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def test_pm_approval_writeup_drives_real_bridge_signal():
+def _isolate_task_queue(monkeypatch, run_id: str) -> None:
+    """Point the bridge (and this test's stub Worker) at a per-run queue.
+
+    temporal_client.TASK_QUEUE is the production queue a real `make worker`
+    polls. On the shared queue a live worker can take the test's workflow
+    task and run real activities (gh calls) for it, and the stub's `stage`
+    query is then missing.
+    """
+    monkeypatch.setattr(temporal_client, "TASK_QUEUE", f"webhook-bridge-e2e-{run_id}")
+
+
+async def test_pm_approval_writeup_drives_real_bridge_signal(monkeypatch):
     client = await _connect_or_skip()
 
     run_id = uuid.uuid4().hex[:8]
@@ -205,6 +216,7 @@ async def test_pm_approval_writeup_drives_real_bridge_signal():
     agent_name = f"demo-widget-{run_id}"
     version = "1"
     wf_id = temporal_client.workflow_id(REPO, agent_name, version)
+    _isolate_task_queue(monkeypatch, run_id)
 
     github_client = MagicMock()
     github_client.get_pull_request = AsyncMock(
@@ -264,7 +276,7 @@ async def test_pm_approval_writeup_drives_real_bridge_signal():
                     await handle.terminate()
 
 
-async def test_pm_rejection_feedback_drives_reject_signal_and_rereview():
+async def test_pm_rejection_feedback_drives_reject_signal_and_rereview(monkeypatch):
     client = await _connect_or_skip()
 
     run_id = uuid.uuid4().hex[:8]
@@ -273,6 +285,7 @@ async def test_pm_rejection_feedback_drives_reject_signal_and_rereview():
     agent_name = f"demo-widget-2-{run_id}"
     version = "1"
     wf_id = temporal_client.workflow_id(REPO, agent_name, version)
+    _isolate_task_queue(monkeypatch, run_id)
 
     github_client = MagicMock()
     github_client.get_pull_request = AsyncMock(
