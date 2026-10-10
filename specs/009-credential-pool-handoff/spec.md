@@ -4,7 +4,9 @@
 
 **Created**: 2026-10-10
 
-**Status**: Draft
+**Status**: Implemented
+
+Open follow-ups (checkpoint enforcement, stale utilization, waiting for a reset, expiry warning, feedback-retry handoff, force-hook routing) continue in `specs/011-seat-pool-hardening`.
 
 **Input**: User description: "009-credential-pool-handoff: a Max-subscription credential pool with checkpointed agent handoff. Run the pipeline's agents (swe-agent, architect-agent; pm-agent review_spec later) on a pool of Claude Max OAuth seats. Each seat has one `claude setup-token` token, passed as CLAUDE_CODE_OAUTH_TOKEN. A seat can be assigned to one agent or several. The seat for each run is the one with the lowest last-seen utilization (RateLimitEvent). When a seat is exhausted (429/rejected) or invalid (401/login expired) mid-task, the work is pushed and a successor run on another seat resumes from the last pushed tasks.md checkpoint without losing committed work. A long-lived Temporal CredentialPoolWorkflow leases seats via updates. Only seat IDs, never tokens, appear in Temporal history, logs and PR comments. Constraint to record: internal, single-operator use only, never offered to third parties (Agent SDK terms; seat rotation is a Consumer-Terms grey area, knowingly accepted). Ships with one real seat (seat-a); failover is testable with two logical seats on one token. Open research: whether LiteLLM can front OAuth seats (if so, rotating seats in LiteLLM is cheaper), and whether empty-string env overrides beat an inherited ANTHROPIC_API_KEY/BASE_URL in the CLI. Out of scope: the GitHub-comment path and pm shape_issue (they stay on the API key), a durable sleep-until-reset when all seats are out, and token-expiry alerting."
 
