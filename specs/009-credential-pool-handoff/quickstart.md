@@ -76,4 +76,29 @@ Run on 2026-10-10 on branch `009-credential-pool-handoff`, with local Temporal u
 | V2 + V3 (Temporal) | `cd orchestration && uv run pytest -q`: **135 passed, 0 skipped**. This covers the pool workflow; Build and architect handoff; pool exhausted; handoff budget; pool unavailable; a failed release; and a cancel during a seat-backed stage or during its lease release. |
 | V4 live seat smoke | `scripts/seat_smoke.py` against seat-a, with a poisoned parent `ANTHROPIC_API_KEY`/`BASE_URL`: **PASS**. `result='OK'`, `utilization=0.65` (`five_hour`). |
 | T042 template rebuild | **Done.** `swe-agent-sandbox` was rebuilt with `e2b template create`, and the in-sandbox `agent.py`/`seat_guard.py` hashes match the commit. |
-| V5 live end-to-end | **Pending.** Needs `GH_TOKEN` and a disposable target repo. |
+| V5 live end-to-end | **Pass, with notes (see below).** Two runs against `aheumaier/pm-agent-scratch-test`. Two logical seats on seat-a's token; `FACTORY_REPO` pointed at the scratch repo so the Register PR stayed there. |
+
+### V5 details (2026-10-10)
+
+- **Run 1** (`v5-seat-handoff`, force hook on seat-a). The architect stage ran on seat-a and left it at 0.91 (`five_hour`). Build was therefore placed on **seat-b** (0.0), so the forced seat was never picked and **no handoff happened**. The run still passed end to end on seats:
+  - per-task commits `T001`, `T002`, `T003`;
+  - seat release recorded 0.46 (`seven_day`);
+  - Eval-Gate passed;
+  - Register opened PR #4;
+  - exactly one feature PR (#3).
+- **Run 2** (`v5-seat-handoff-2`, force hook on seat-b):
+  - The architect stage ran on seat-b.
+  - Build lease 0 was on seat-b. The model implemented **all three tasks in one commit**, ignoring the commit-per-task prompt. The force hook then fired, the agent pushed that commit, and the activity failed with `SeatExhausted`.
+  - `report_seat_failure` gave seat-b `exhausted_until ≈ now+1h` and utilization 1.0.
+  - Build lease 1 was on **seat-a**. Every task was `[X]`, so it took the **all-done shortcut**: no model call, straight to the PR. Its usage is null, so seat-a kept its old reading.
+  - Exactly one feature PR (#5). Eval-Gate and Register passed.
+  - The lossless handoff (SC-002/SC-003) is shown. "Successor resumes at task 2" was not observable, because there was no partial checkpoint.
+- **Secrecy (SC-006).** I searched the full Temporal histories of both runs and of `credential-pool-v5`, both worker logs, and every scratch-repo PR comment. The search looked for the actual values of all `.env` secrets and for the `sk-ant-oat` prefix. Result: **0 hits** everywhere.
+
+### Follow-ups surfaced by V5
+
+1. **Stale utilization.** A seat's `last_utilization` from a five-hour window is kept after that window resets. seat-a stayed at 0.91 after its 18:00 UTC reset, so selection kept avoiding it. Fix: store the reading's `resets_at`, and treat the reading as 0 once that time has passed.
+2. **Checkpointing depends on the prompt.** In run 2 the model batched all tasks into one commit. A real exhaustion in the middle of that batch would lose the uncommitted work. Options: have the harness detect `[X]` transitions and commit, or check that commits ≈ tasks done.
+3. **Test workflows on the production task queue.** A leftover `webhook_bridge` integration-test workflow (`pipeline/owner/repo/demo-widget-…`) sat on `agent-factory-pipeline`, and the real V5 worker, holding real credentials, ran one of its activities. It failed harmlessly on the fake `owner/repo`. Integration tests should use their own task queue, or terminate their workflows.
+4. **The force hook targets one seat ID.** Selection by utilization can route around it, as in run 1. For a deterministic test, force the seat that will be picked, or make the forced seat win on its assignment order with fresh state.
+

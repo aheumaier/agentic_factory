@@ -272,9 +272,10 @@ description: "Task list for 009-credential-pool-handoff"
   *Done (2026-10-10):* E2B CLI 2.21.2 has no `template build`. The equivalent, run from the repo root, is `e2b template create swe-agent-sandbox -p . -d sandbox/swe-agent/Dockerfile --cpu-count 2 --memory-mb 1024`, which rebuilt the existing template `hsba4h3huewux87jl2sd` in place. Verified in a credential-less sandbox: the sha256 of `/app/agent.py` and `/app/seat_guard.py` matches commit `8e2cbfb`, `claude-agent-sdk` is 0.2.165, and `seat_guard` imports.
 
 - [X] T043 Run quickstart V1–V3 locally (`make up`, then both suites with no skips) and V4 against seat-a. Record the results in `specs/009-credential-pool-handoff/quickstart.md` under a "Results" heading.
-- [ ] T044 Run quickstart V5 (live end-to-end with forced handoff and the secrecy grep) once `E2B_API_KEY`, `GH_TOKEN` and a disposable target repo are available. Until then, record it as pending with the missing prerequisites listed.
+- [X] T044 Run quickstart V5 (live end-to-end with forced handoff and the secrecy grep) once `E2B_API_KEY`, `GH_TOKEN` and a disposable target repo are available. Until then, record it as pending with the missing prerequisites listed.
 
-  *Pending (2026-10-10):* T042 is done and `E2B_API_KEY` is set. Still missing: `GH_TOKEN` (or the SWE-agent GitHub App credentials that mint it) and a disposable target repo with a pre-planned `specs/<branch>/tasks.md` branch.
+  *Done (2026-10-10):* the details and four follow-ups are in `quickstart.md` under "V5 details". In summary, the handoff was lossless, the successor took the all-done shortcut, there was exactly one PR, and the secrecy grep found 0 hits.
+
 - [X] T045 Run `py-codereviewer` over the full 009 diff and resolve the findings before the PR.
 
 ---
