@@ -68,4 +68,29 @@ Afterwards, stop the worker and terminate `credential-pool-v5b`.
 
 ## Results
 
-To be filled in by the implementation run.
+Run on 2026-10-10 on branch `011-seat-pool-hardening`, with local Temporal up.
+
+| Step | Result |
+|---|---|
+| V1 unit tests | `uv run pytest tests/ -q`: **126 passed**. `uv run ruff check .`: **All checks passed!** The `seat_guard.py` copies are byte-identical (`cmp`). |
+| V2 + V3 (Temporal) | `cd orchestration && uv run pytest -q`: **167 passed, 0 skipped**. |
+| Code review | `py-codereviewer`, round 1: 2 major and 5 minor findings, all fixed (see below). Round 2: **APPROVE, no findings**. |
+| Live seat smoke | `scripts/seat_smoke.py` (21:12 UTC): **PASS**, `utilization=0.5` (`seven_day`). The live usage signal carries a per-window reset, and the new `utilization_resets_at` key came back filled (the seven-day window's reset). This confirms F2's assumption against the real API. |
+
+### Review findings and what was done (2026-10-10)
+
+1. **Major.** F5 skipped the "no new commit" check on any successor. The Eval-Gate never looks at the diff, so a no-op successor could pass. Now the check is skipped only when every task is done. research.md R6 was corrected.
+2. **Major.** `token_expires_on` was never validated, but F4 parses it at boot and in `seats()`. `validate_pool` now rejects a non-date and names the seat. This covers boot and `reload_config`.
+3. **Minor.** The earliest reset was taken over every seat. Now it comes from the new `earliest_reset_for(agent)` query: assigned, non-invalid seats only.
+4. **Minor.** Done-task keys were not per file, so in fallback mode an older spec's T001 hid this feature's T001. They are now keyed by `(path, id)`.
+5. **Minor.** The checkpoint git calls blocked the event loop. They now run via `asyncio.to_thread`; the ordering with `force_check` is kept.
+6. **Minor.** A later reading could keep an older reading's reset time. `_merge_usage` now updates the two as a pair.
+7. **Minor.** `reset_seat` left the exhaustion's 1.0 reading in place. It now clears the reading.
+
+The reviewer's test gap "a past reset counts as one wait" is now covered by a test.
+
+**Deploy note:** terminate or restart any existing long-lived `credential-pool` workflow before deploying 011 (research R3). On 2026-10-10 none exists on the local server.
+
+### V5 re-run
+
+Pending.

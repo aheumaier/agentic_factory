@@ -32,7 +32,7 @@ this agent's system-prompt-as-data; keep the two in sync if either changes.
   one PR, then stops. A human (or a separate follow-up pass) handles CI
   failures and re-review.
 
-## Subscription seats and resume (specs/009)
+## Subscription seats and resume (specs/009, hardened in specs/011)
 
 On the Temporal path (`run_swe_agent_activity`), the agent runs on a Claude
 Max subscription seat leased from the credential pool. The sandbox receives
@@ -40,9 +40,15 @@ the seat's OAuth token as `CLAUDE_CODE_OAUTH_TOKEN`, with no API key, and
 `seat_guard.py` makes it the only credential the CLI sees. Calls go direct to
 Anthropic, a documented §3.4 deviation.
 
-- **Checkpoints.** The run prompt tells the model to skip tasks already
-  marked `[X]` and to mark and commit each task as it finishes, without
-  pushing.
+- **Checkpoints (specs/011).** The run prompt tells the model to skip tasks
+  already marked `[X]` and to mark each task `[X]` as soon as it finishes it.
+  The harness, not the model, then saves the checkpoint: after every streamed
+  message, when the feature's set of done task IDs has grown and the tree is
+  dirty, `agent.py` commits it as `checkpoint: T001 …`. If the model already
+  committed, nothing more is committed. Edits left after the last tick are
+  committed as `checkpoint: end of run` on a normal finish. Commits are
+  local; the push happens later. Without a configured git identity, the
+  commit uses `swe-agent <swe-agent@users.noreply.github.com>`.
 - **Seat outcomes.** If the seat runs out (`SeatExhausted`) or its token is
   rejected (`SeatInvalid`) mid-run, `agent.py` pushes every commit on the
   branch and prints a `{"seat_status": …}` JSON line last. It then exits
@@ -51,11 +57,21 @@ Anthropic, a documented §3.4 deviation.
   exits 1, so a seat outcome never hides lost work.
 - **Resume.** The successor clones the pushed branch and continues from the
   first open task. If the feature's `tasks.md` is already fully checked, and
-  this is not a Gate-feedback retry, it skips straight to opening the PR.
+  this is not a Gate-feedback retry, it skips straight to opening the PR. A
+  successor seat (`SEAT_HANDOFF_INDEX` > 0, set by the workflow) with every
+  task done skips the "made no new commit" check, because its predecessor may
+  already have pushed this attempt's work (e.g. a Gate-feedback fix).
+- **Usage reading.** Every `seat_status` line also carries
+  `utilization_resets_at`, the reset time of the usage window the reading
+  came from. The pool stops counting the reading after that time.
 - **Force hook.** `SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS=N` forces exhaustion
-  after N commits, as a live-handoff test hook (quickstart V5).
+  after N commits, harness checkpoints included, as a live-handoff test hook
+  (quickstart V5). The worker forwards it when the seat matches
+  `SEAT_GUARD_FORCE_EXHAUST_SEAT`, or when the handoff index matches
+  `SEAT_GUARD_FORCE_EXHAUST_HANDOFF`. Seat selection cannot route around the
+  handoff index.
 
-**Usage constraint (binding):** internal, single-operator use only. The seats belong to the operator running this pipeline; neither the pipeline nor its seats are ever offered to third parties (Agent SDK terms). Rotating several subscription seats is a Consumer-Terms grey area the operator accepted knowingly (2026-10-10). This is not a supported product feature; see `specs/009-credential-pool-handoff/spec.md`.
+**Usage constraint (binding):** internal, single-operator use only. The seats belong to the operator running this pipeline; neither the pipeline nor its seats are ever offered to third parties (Agent SDK terms). Rotating several subscription seats is a Consumer-Terms grey area the operator accepted knowingly (2026-10-10). This is not a supported product feature; see `specs/009-credential-pool-handoff/spec.md` and `specs/011-seat-pool-hardening/spec.md`.
 
 ## Known gap
 
@@ -69,15 +85,20 @@ model. The one structural guarantee is that the checkout never ends on
 run on the host; not acceptable for repeated/unattended use without the
 sandbox isolation `sandbox/` is meant to eventually provide.
 
-### Seat-pool gaps (specs/009)
+### Seat-pool gaps (specs/009, 011)
 
 - **The GitHub-comment path (`swe-agent-build.yml`) still uses the API key.**
   Seat mode, checkpoint pushes and exit codes 75/77 apply only to the
   Temporal path; without `CLAUDE_CODE_OAUTH_TOKEN` the agent behaves as before.
-- **No durable sleep-until-reset.** When every eligible seat is out, the run
-  fails with `CredentialPoolExhausted` (earliest reset in its details) instead
-  of waiting for the reset.
-- **No token-expiry alert.** `token_expires_on` in `pool.yaml` is recorded,
-  but nothing warns before a seat's `claude setup-token` token expires. An
-  expired token surfaces as `SeatInvalid`, and the operator re-runs
-  `reset_seat` after renewing it.
+- **Waiting for a reset is bounded (specs/011).** When every eligible seat is
+  out, the workflow waits durably for the earliest reset, but only if that
+  reset is at most 6 h away, and at most twice per stage. A later reset, or a
+  pool with only invalid seats, still fails with `CredentialPoolExhausted`.
+- **Token expiry is a log line only (specs/011).** The worker logs a warning
+  at startup for any seat within 14 days of `token_expires_on`, and the
+  pool's `seats()` table shows `expires_in_days`. Nothing posts to a PR or to
+  Teams. An expired token surfaces as `SeatInvalid`; after renewing it, the
+  operator runs `reset_seat`.
+- **Tick granularity is the model's.** If the model marks several tasks
+  `[X]` in one edit, they land in one checkpoint, so a handoff can still
+  redo at most the tasks in that batch.

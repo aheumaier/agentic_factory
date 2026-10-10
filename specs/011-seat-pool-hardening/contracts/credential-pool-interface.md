@@ -10,6 +10,8 @@ Extends `specs/009-credential-pool-handoff/contracts/credential-pool-interface.m
 |---|---|
 | `release` | New trailing arg `utilization_resets_at: str \| None = None` (tz-aware ISO; validator rejects a naive one). When `utilization` is non-null, it stores both the reading and this reset time (`None` clears an older one). |
 | `mark_exhausted` | Also sets `utilization_resets_at = exhausted_until`, so the 1.0 reading expires with the exhaustion. |
+| `reset_seat` | Also clears the reading (`last_utilization = 0.0`, `utilization_resets_at = None`), so a renewed seat is not left last in line. |
+| `reload_config` | Its validator (shared `validate_pool`) now rejects a `token_expires_on` that is not a `YYYY-MM-DD` date, naming the seat. So does worker boot. |
 
 ## Selection
 
@@ -18,6 +20,8 @@ Extends `specs/009-credential-pool-handoff/contracts/credential-pool-interface.m
 ## Query
 
 `seats()` rows gain `"utilization_resets_at": str|None` and `"expires_in_days": int|None`.
+
+New query `earliest_reset_for(agent) -> str|None`: the earliest future `exhausted_until` among `agent`'s assigned, non-invalid seats. `acquire_seat_activity` uses it for `earliest_reset` (it used to take the minimum over every seat).
 
 ## Activities
 

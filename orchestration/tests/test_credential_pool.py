@@ -9,15 +9,18 @@ a live workflow onto the dev server for every test run.
 """
 import contextlib
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.worker import Worker
 
 from credentials.pool import (
+    EXPIRY_WARN_DAYS,
     LEASE_TTL,
     earliest_reset,
+    expires_in_days,
+    expiring_seats,
     load_pool,
     new_seat_state,
     select_seat,
@@ -300,6 +303,8 @@ async def test_pool_seats_query_never_exposes_token_env(two):
         assert set(table["seat-a"]) == {
             "active_leases", "last_utilization", "last_rate_limit_type",
             "exhausted_until", "invalid", "max_concurrent",
+            "utilization_resets_at",  # specs/011 F2
+            "expires_in_days",  # specs/011 F4
         }
 
 
@@ -365,3 +370,198 @@ async def test_pool_rejects_invalid_reload_config_and_stays_healthy(two):
         assert await pool.execute_update(
             CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"]
         ) == "seat-a"
+
+
+# --- specs/011 F2: reset-aware utilization -------------------------------------
+
+def test_select_reading_counts_as_zero_once_its_window_reset(two):
+    past = (NOW - timedelta(minutes=1)).isoformat()
+    state = _state(seat_a={"last_utilization": 0.9, "utilization_resets_at": past},
+                   seat_b={"last_utilization": 0.3})
+    assert _pick(two, state) == "seat-a"
+
+
+def test_select_reading_counts_while_its_window_is_open(two):
+    future = (NOW + timedelta(hours=2)).isoformat()
+    state = _state(seat_a={"last_utilization": 0.9, "utilization_resets_at": future},
+                   seat_b={"last_utilization": 0.3})
+    assert _pick(two, state) == "seat-b"
+
+
+def test_select_reading_without_reset_time_counts_as_is(two):
+    state = _state(seat_a={"last_utilization": 0.9}, seat_b={"last_utilization": 0.3})
+    assert _pick(two, state) == "seat-b"
+
+
+def test_select_expired_exhaustion_reading_counts_as_zero(two):
+    """mark_exhausted's 1.0 carries the exhaustion end as its reset."""
+    ended = (NOW - timedelta(minutes=5)).isoformat()
+    state = _state(
+        seat_a={"last_utilization": 1.0, "exhausted_until": ended, "utilization_resets_at": ended},
+        seat_b={"last_utilization": 0.3},
+    )
+    assert _pick(two, state) == "seat-a"
+
+
+def test_select_accepts_pre_011_state_without_the_key(two):
+    state = _state(seat_b={"last_utilization": 0.3})
+    del state["seat-a"]["utilization_resets_at"]
+    state["seat-a"]["last_utilization"] = 0.9
+    assert _pick(two, state) == "seat-b"
+
+
+async def test_pool_release_stores_and_clears_the_readings_reset(two):
+    resets = "2026-10-12T19:00:00+00:00"
+    async with _running_pool(two) as pool:
+        await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
+        await pool.execute_update(
+            CredentialPoolWorkflow.release, args=["seat-a", "k1", 0.4, "seven_day", resets]
+        )
+        assert (await pool.query(CredentialPoolWorkflow.seats))["seat-a"][
+            "utilization_resets_at"] == resets
+
+        # A new reading without a reset time never inherits the old one.
+        await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k2"])
+        await pool.execute_update(
+            CredentialPoolWorkflow.release, args=["seat-a", "k2", 0.1, "five_hour"]
+        )
+        row = (await pool.query(CredentialPoolWorkflow.seats))["seat-a"]
+        assert (row["last_utilization"], row["utilization_resets_at"]) == (0.1, None)
+
+
+async def test_pool_mark_exhausted_reading_expires_with_the_exhaustion(two):
+    resets = "2026-10-12T19:00:00+00:00"
+    async with _running_pool(two) as pool:
+        await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
+        await pool.execute_update(
+            CredentialPoolWorkflow.mark_exhausted, args=["seat-a", "k1", resets]
+        )
+        row = (await pool.query(CredentialPoolWorkflow.seats))["seat-a"]
+        assert (row["last_utilization"], row["utilization_resets_at"]) == (1.0, resets)
+
+
+async def test_pool_rejects_naive_reading_reset(two):
+    async with _running_pool(two) as pool:
+        await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
+        with pytest.raises(WorkflowUpdateFailedError):
+            await pool.execute_update(
+                CredentialPoolWorkflow.release,
+                args=["seat-a", "k1", 0.4, "seven_day", "2026-10-12T19:00:00"],
+            )
+        # Rejected before mutation: the lease is still held.
+        assert (await pool.query(CredentialPoolWorkflow.seats))["seat-a"]["active_leases"] == 1
+
+
+async def test_pool_upgrades_state_carried_from_009(two):
+    old = {k: v for k, v in new_seat_state().items() if k != "utilization_resets_at"}
+    async with _running_pool({**two, "state": {"seat-a": dict(old, last_utilization=0.5)}}) as pool:
+        row = (await pool.query(CredentialPoolWorkflow.seats))["seat-a"]
+        assert (row["last_utilization"], row["utilization_resets_at"]) == (0.5, None)
+        assert await pool.execute_update(
+            CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"]
+        ) == "seat-b"
+
+
+# --- specs/011 F4: credential expiry --------------------------------------------
+
+def test_expires_in_days_future_past_and_missing():
+    today = date(2026, 10, 10)
+    assert expires_in_days({"token_expires_on": "2026-10-13"}, today) == 3
+    assert expires_in_days({"token_expires_on": "2026-10-01"}, today) == -9
+    assert expires_in_days({"token_expires_on": None}, today) is None
+
+
+def test_expiring_seats_uses_the_warn_threshold():
+    pool = {"seats": {
+        "soon": {"token_expires_on": "2026-10-13"},
+        "edge": {"token_expires_on": (date(2026, 10, 10) + timedelta(days=EXPIRY_WARN_DAYS)).isoformat()},
+        "later": {"token_expires_on": "2027-11-14"},
+        "expired": {"token_expires_on": "2026-01-01"},
+        "undated": {"token_expires_on": None},
+    }}
+    assert [s for s, _, _ in expiring_seats(pool, date(2026, 10, 10))] == ["soon", "edge", "expired"]
+
+
+async def test_pool_seat_table_shows_days_until_expiry(two):
+    async with _running_pool(two) as pool:
+        table = await pool.query(CredentialPoolWorkflow.seats)
+    today = datetime.now(UTC).date()
+    assert table["seat-a"]["expires_in_days"] == (date(2027, 10, 10) - today).days
+    assert table["seat-b"]["expires_in_days"] is None
+
+
+def test_worker_warns_once_per_expiring_seat(caplog):
+    from worker import warn_expiring_seats
+
+    pool = {"seats": {
+        "seat-a": {"token_env": "SECRET_ENV_NAME", "token_expires_on": "2026-10-13"},
+        "seat-b": {"token_env": "OTHER_ENV_NAME", "token_expires_on": "2027-11-14"},
+        "seat-c": {"token_env": "THIRD_ENV_NAME", "token_expires_on": None},
+    }}
+    with caplog.at_level("WARNING", logger="worker"):
+        warn_expiring_seats(pool, date(2026, 10, 10))
+    assert [r.getMessage() for r in caplog.records] == [
+        "seat seat-a: credential expires on 2026-10-13 (3 days) - renew it with "
+        "`claude setup-token`, then update .env and token_expires_on in pool.yaml",
+    ]
+    assert "ENV_NAME" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["2027-10-10T00:00:00", "Oct 2027", "'2027-13-01'"])
+def test_load_pool_rejects_a_non_date_expiry(tmp_path, value):
+    """F4 parses token_expires_on at boot and in seats(): reject it up front,
+    naming the seat, instead of crashing later."""
+    text = f"seats:\n  seat-a: {{token_env: X, token_expires_on: {value}}}\n"
+    with pytest.raises(ValueError, match="seat 'seat-a' token_expires_on must be a date"):
+        load_pool(_write_pool(tmp_path, text))
+
+
+def test_load_pool_normalizes_a_quoted_date(tmp_path):
+    text = "seats:\n  seat-a: {token_env: X, token_expires_on: '2027-10-10'}\n"
+    assert load_pool(_write_pool(tmp_path, text))["seats"]["seat-a"]["token_expires_on"] == "2027-10-10"
+
+
+async def test_pool_rejects_reload_config_with_a_non_date_expiry(two):
+    async with _running_pool(two) as pool:
+        bad = {**two["seats"], "seat-b": {**two["seats"]["seat-b"], "token_expires_on": "Oct 2027"}}
+        with pytest.raises(WorkflowUpdateFailedError):
+            await pool.execute_update(
+                CredentialPoolWorkflow.reload_config, args=[bad, two["assignments"]]
+            )
+        assert "seat-a" in await pool.query(CredentialPoolWorkflow.seats)
+
+
+# --- specs/011 review fixes: earliest reset per agent, reset_seat ---------------
+
+def test_earliest_reset_only_counts_given_seats_and_skips_invalid():
+    soon, later = NOW + timedelta(minutes=10), NOW + timedelta(hours=3)
+    state = _state(seat_a={"exhausted_until": later.isoformat()},
+                   seat_b={"exhausted_until": soon.isoformat()})
+    assert earliest_reset(state, NOW, ["seat-a"]) == later.isoformat()
+    state["seat-b"]["invalid"] = True
+    assert earliest_reset(state, NOW) == later.isoformat()
+
+
+async def test_pool_earliest_reset_for_uses_the_agents_own_seats(two):
+    """architect-agent has only seat-b: seat-a's sooner reset is not its wait."""
+    soon = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+    later = (datetime.now(UTC) + timedelta(hours=3)).isoformat()
+    async with _running_pool(two) as pool:
+        for seat, key, until in (("seat-a", "k1", soon), ("seat-b", "k2", later)):
+            await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", key])
+            await pool.execute_update(CredentialPoolWorkflow.mark_exhausted, args=[seat, key, until])
+        assert await pool.query(CredentialPoolWorkflow.earliest_reset_for, "swe-agent") == soon
+        assert await pool.query(CredentialPoolWorkflow.earliest_reset_for, "architect-agent") == later
+        assert await pool.query(CredentialPoolWorkflow.earliest_reset_for, "nobody") is None
+
+
+async def test_pool_reset_seat_clears_the_exhaustion_reading(two):
+    async with _running_pool(two) as pool:
+        await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
+        await pool.execute_update(
+            CredentialPoolWorkflow.mark_exhausted, args=["seat-a", "k1", "2099-01-01T00:00:00+00:00"]
+        )
+        await pool.execute_update(CredentialPoolWorkflow.reset_seat, args=["seat-a"])
+        row = (await pool.query(CredentialPoolWorkflow.seats))["seat-a"]
+    assert (row["last_utilization"], row["utilization_resets_at"], row["exhausted_until"]) == (
+        0.0, None, None)

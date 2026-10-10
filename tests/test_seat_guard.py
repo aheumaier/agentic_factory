@@ -81,6 +81,8 @@ def test_usage_takes_max_unified_window():
     info = sdk.RateLimitInfo(raw=R2_RAW, resets_at=1791655200, rate_limit_type="five_hour")
     assert guard.usage_from_rate_limit_info(info) == {
         "utilization": 0.37, "rate_limit_type": "seven_day", "resets_at": 1791655200,
+        # specs/011 F2: the seven-day window's own reset, not the top-level one
+        "utilization_resets_at": 1791831600,
     }
 
 
@@ -88,17 +90,25 @@ def test_usage_falls_back_to_typed_fields():
     info = sdk.RateLimitInfo(utilization=0.5, rate_limit_type="five_hour", resets_at=7)
     assert guard.usage_from_rate_limit_info(info) == {
         "utilization": 0.5, "rate_limit_type": "five_hour", "resets_at": 7,
+        "utilization_resets_at": 7,
     }
 
 
 def test_usage_all_missing_is_none():
     usage = guard.usage_from_rate_limit_info(sdk.RateLimitInfo())
-    assert usage == {"utilization": None, "rate_limit_type": None, "resets_at": None}
+    assert usage == {"utilization": None, "rate_limit_type": None, "resets_at": None,
+                     "utilization_resets_at": None}
 
 
 def test_usage_resets_at_from_raw_when_typed_missing():
     info = sdk.RateLimitInfo(raw={"resetsAt": 123})
     assert guard.usage_from_rate_limit_info(info)["resets_at"] == 123
+
+
+def test_usage_window_without_its_own_reset_falls_back_to_top_level():
+    raw = {"resetsAt": 99, "unifiedWindows": {"five_hour": {"utilization": 0.4}}}
+    usage = guard.usage_from_rate_limit_info(sdk.RateLimitInfo(raw=raw))
+    assert (usage["utilization"], usage["utilization_resets_at"]) == (0.4, 99)
 
 
 # --- seat_options_env (research R1) -------------------------------------------
@@ -121,7 +131,8 @@ def test_guarded_query_passes_messages_and_records_usage():
         "p", None, usage, query_fn=_fake_query(_event(raw=R2_RAW, resets_at=99), done),
     )))
     assert out[-1] is done
-    assert usage == {"utilization": 0.37, "rate_limit_type": "seven_day", "resets_at": 99}
+    assert usage == {"utilization": 0.37, "rate_limit_type": "seven_day", "resets_at": 99,
+                     "utilization_resets_at": 1791831600}
 
 
 def test_guarded_query_rejected_event_raises_exhausted_with_reset():
@@ -210,3 +221,15 @@ def test_result_error_exhaustion_ignores_reset_from_earlier_allowed_event():
         asyncio.run(_drain(guard.guarded_query("p", None, usage, query_fn=fake)))
     assert exc.value.resets_at is None
     assert exc.value.usage["utilization"] == 0.37
+
+
+def test_guarded_query_never_pairs_a_new_reading_with_an_old_reset():
+    """specs/011 F2: a later reading without its own reset time must not keep
+    the earlier reading's reset."""
+    first = _event(raw={"unifiedWindows": {"five_hour": {"utilization": 0.2, "resetsAt": 50}}})
+    second = _event(raw={"unifiedWindows": {"five_hour": {"utilization": 0.3}}})
+    usage: dict = {}
+    asyncio.run(_drain(guard.guarded_query(
+        "p", None, usage, query_fn=_fake_query(first, second, sdk.ResultMessage(result="OK")),
+    )))
+    assert (usage["utilization"], usage["utilization_resets_at"]) == (0.3, None)

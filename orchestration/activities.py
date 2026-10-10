@@ -19,7 +19,7 @@ from e2b import AsyncSandbox, CommandExitException
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from credentials.pool import earliest_reset, load_pool, token_for
+from credentials.pool import load_pool, token_for
 
 # Mirrors harness/swe-agent/agent.py's own _REPO_RE/_BRANCH_RE: repo/branch
 # are workflow inputs threaded into a shell command run inside the sandbox
@@ -94,18 +94,21 @@ async def acquire_seat_activity(agent: str, lease_key: str) -> dict:
     seat_id = await handle.execute_update("acquire", args=[agent, lease_key])
     reset = None
     if seat_id is None:
-        # Future resets only: past exhaustion marks are never cleared.
-        reset = earliest_reset(await handle.query("seats"), datetime.now(UTC))
+        # Future resets of this agent's own, non-invalid seats only (specs/011
+        # F3 waits on it); past exhaustion marks are never cleared.
+        reset = await handle.query("earliest_reset_for", agent)
     return {"seat_id": seat_id, "earliest_reset": reset}
 
 
 @activity.defn
 async def release_seat_activity(
     seat_id: str, lease_key: str, utilization: float | None, rate_limit_type: str | None,
+    utilization_resets_at: str | None = None,
 ) -> None:
-    """Return a seat to the pool with its last-seen usage. No-op if not held."""
+    """Return a seat to the pool with its last-seen usage and the reset time
+    of the window that reading came from (specs/011 F2). No-op if not held."""
     await _pool_handle().execute_update(
-        "release", args=[seat_id, lease_key, utilization, rate_limit_type]
+        "release", args=[seat_id, lease_key, utilization, rate_limit_type, utilization_resets_at]
     )
 
 
@@ -146,26 +149,35 @@ def _epoch_to_iso(epoch: int | float | None) -> str | None:
     return datetime.fromtimestamp(epoch, tz=UTC).isoformat()
 
 
-def _sandbox_envs(seat_id: str) -> dict[str, str]:
+def _sandbox_envs(seat_id: str, handoff: int = 0) -> dict[str, str]:
     envs = {
         "CLAUDE_CODE_OAUTH_TOKEN": token_for(seat_id, load_pool()),
         "GH_TOKEN": os.environ["GH_TOKEN"],
+        # specs/011 F5: a successor (> 0) skips agent.py's "no new commit" check.
+        "SEAT_HANDOFF_INDEX": str(handoff),
     }
     # Live-handoff test hook (quickstart V5): forced exhaustion only on the
-    # one named seat, so the successor on another seat runs normally.
+    # one named seat, or (specs/011 F6) on whichever seat runs the named
+    # handoff index — seat selection by usage can't route around that one.
+    # The successor then runs normally.
     force = os.environ.get("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS")
-    if force and seat_id == os.environ.get("SEAT_GUARD_FORCE_EXHAUST_SEAT"):
+    if force and (
+        seat_id == os.environ.get("SEAT_GUARD_FORCE_EXHAUST_SEAT")
+        or str(handoff) == os.environ.get("SEAT_GUARD_FORCE_EXHAUST_HANDOFF")
+    ):
         envs["SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS"] = force
     return envs
 
 
 @activity.defn
 async def run_swe_agent_activity(
-    repo: str, branch: str, feedback: str | None, seat_id: str,
+    repo: str, branch: str, feedback: str | None, seat_id: str, handoff: int = 0,
 ) -> dict:
     """Build + Sandbox Test collapsed (§3.2 + §3.3) on credential-pool seat
     `seat_id` (specs/009). Not idempotent — may already have pushed/opened a
-    PR on partial failure. Workflow sets maximum_attempts=1.
+    PR on partial failure. Workflow sets maximum_attempts=1. `handoff` is
+    this seat's position within the Build invocation (specs/011; default 0
+    for tasks scheduled by pre-011 workflow code).
 
     Returns {"pr_url", "seat_id", "utilization", "rate_limit_type"}. A seat
     outcome (agent.py exit 75/77 — it has already pushed its committed
@@ -177,7 +189,7 @@ async def run_swe_agent_activity(
     sandbox = await AsyncSandbox.create(
         template=_SANDBOX_TEMPLATE,
         timeout=_SANDBOX_TIMEOUT_SECONDS,
-        envs=_sandbox_envs(seat_id),
+        envs=_sandbox_envs(seat_id, handoff),
     )
     try:
         argv = ["python3", "/app/agent.py", repo, branch]
@@ -207,6 +219,7 @@ async def run_swe_agent_activity(
             "seat_id": seat_id,
             "utilization": status.get("utilization"),
             "rate_limit_type": status.get("rate_limit_type"),
+            "utilization_resets_at": _epoch_to_iso(status.get("utilization_resets_at")),
         }
     finally:
         await sandbox.kill()
@@ -369,6 +382,7 @@ async def architect_stage_activity(
             "seat_id": seat_id,
             "utilization": usage.get("utilization"),
             "rate_limit_type": usage.get("rate_limit_type"),
+            "utilization_resets_at": _epoch_to_iso(usage.get("utilization_resets_at")),
         })
     return result
 

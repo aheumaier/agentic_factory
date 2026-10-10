@@ -69,13 +69,17 @@ A wait does not advance the handoff counter.
 
 **Why `patched` only on this path.** That way successful runs gain no marker. On replay of a 009-era run that failed with `CredentialPoolExhausted`, the history has no marker, so `patched()` returns `False` and the run fails as before.
 
+**Which reset.** `acquire_seat_activity` reads the earliest reset from a new pool query, `earliest_reset_for(agent)`, which considers only that agent's assigned, non-invalid seats. Otherwise an unrelated seat's sooner reset would make the stage sleep for nothing. *(Code-review fix, 2026-10-10.)*
+
 **Test without time-skipping.** A stub `acquire_seat_activity` returns `{"seat_id": None, "earliest_reset": now+2s}` once and then a seat. The real sleep stays at about 3 s.
 
 ## R6: F5 condition (dropping "ahead of the original start")
 
-**Decision.** Skip `verify_new_commit` whenever `SEAT_HANDOFF_INDEX > 0`.
+**Decision.** Skip `verify_new_commit` only when `SEAT_HANDOFF_INDEX > 0` **and** the feature's `tasks.md` has no open task. A successor that leaves tasks open and commits nothing still fails with exit 1, exactly like the first seat. *(Narrowed after code review on 2026-10-10; the first version skipped on any handoff index > 0.)*
 
-**Why.** A successor's clone already contains the predecessor's pushed commits, so "ahead of the original start" would need the first seat's start SHA. That SHA would have to travel through `SeatExhausted` details, then through `_with_seat`, and then into the next activity's arguments. That is a lot of plumbing for one rare case. The gap that remains: the predecessor pushed nothing and the successor commits nothing. The Build then proceeds, and the Eval-Gate judges the unchanged branch. That can cost a Build attempt, but it no longer fails the run with exit 1. Agent-decided, to confirm.
+**Why.** A successor's clone already contains the predecessor's pushed commits, so "ahead of the original start" would need the first seat's start SHA. That SHA would have to travel through `SeatExhausted` details, then through `_with_seat`, and then into the next activity's arguments. That is a lot of plumbing for one rare case. The F5 case itself, a Gate-feedback retry, always has every task `[X]`.
+
+**Remaining gap, stated plainly.** On a feedback retry where the predecessor pushed nothing *and* the successor commits nothing, the Build proceeds to the PR step. The Eval-Gate does **not** catch this: today's gate (`eval.config.py::run_eval`) checks the exit code, that a PR exists and that SC-NNN criteria are present, never the diff. So the unchanged branch can pass. That is no worse than 009, where a model's no-op commit also passed. Agent-decided, to confirm.
 
 ## R7: Git identity for harness commits (F1)
 

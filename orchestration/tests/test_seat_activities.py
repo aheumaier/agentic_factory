@@ -59,6 +59,7 @@ def sandbox(monkeypatch):
     monkeypatch.delenv("CREDENTIAL_POOL_CONFIG", raising=False)
     monkeypatch.delenv("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS", raising=False)
     monkeypatch.delenv("SEAT_GUARD_FORCE_EXHAUST_SEAT", raising=False)
+    monkeypatch.delenv("SEAT_GUARD_FORCE_EXHAUST_HANDOFF", raising=False)
 
     def use(outcome) -> _FakeSandbox:
         holder["box"] = _FakeSandbox(outcome)
@@ -67,9 +68,11 @@ def sandbox(monkeypatch):
     return use
 
 
-def _ok_stdout(utilization=0.37, rate_limit_type="seven_day"):
+def _ok_stdout(utilization=0.37, rate_limit_type="seven_day", utilization_resets_at=None):
     status = {"seat_status": "ok", "utilization": utilization,
               "rate_limit_type": rate_limit_type}
+    if utilization_resets_at is not None:
+        status["utilization_resets_at"] = utilization_resets_at
     return f"working...\n{json.dumps(status)}\nhttps://github.com/o/r/pull/7\n"
 
 
@@ -99,6 +102,7 @@ async def test_success_returns_dict_with_usage(sandbox):
     assert result == {
         "pr_url": "https://github.com/o/r/pull/7", "seat_id": "seat-a",
         "utilization": 0.37, "rate_limit_type": "seven_day",
+        "utilization_resets_at": None,
     }
     assert box.killed
 
@@ -264,3 +268,50 @@ async def test_architect_missing_seat_token_is_typed_pool_failure(architect, mon
     assert exc.value.type == "CredentialPoolUnavailable"
     assert exc.value.non_retryable
     assert "CLAUDE_OAUTH_SEAT_A" in str(exc.value)
+
+
+# --- specs/011: handoff index (F5) and force hook by handoff (F6) -------------
+
+async def test_sandbox_env_carries_handoff_index(sandbox):
+    box = sandbox(_Result(_ok_stdout()))
+    await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert box.created_with["envs"]["SEAT_HANDOFF_INDEX"] == "0"
+    box = sandbox(_Result(_ok_stdout()))
+    await activities.run_swe_agent_activity("o/r", "feat-x", "fix it", "seat-a", 2)
+    assert box.created_with["envs"]["SEAT_HANDOFF_INDEX"] == "2"
+
+
+async def test_force_hook_by_handoff_index_on_any_seat(sandbox, monkeypatch, tmp_path):
+    pool = tmp_path / "pool.yaml"
+    pool.write_text(
+        "seats:\n"
+        "  seat-a: {token_env: CLAUDE_OAUTH_SEAT_A}\n"
+        "  seat-b: {token_env: CLAUDE_OAUTH_SEAT_A}\n"
+        "assignments: {swe-agent: [seat-a, seat-b]}\n"
+    )
+    monkeypatch.setenv("CREDENTIAL_POOL_CONFIG", str(pool))
+    monkeypatch.setenv("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS", "1")
+    monkeypatch.setenv("SEAT_GUARD_FORCE_EXHAUST_HANDOFF", "0")
+    for seat_id in ("seat-a", "seat-b"):
+        box = sandbox(_Result(_ok_stdout()))
+        await activities.run_swe_agent_activity("o/r", "feat-x", None, seat_id, 0)
+        assert box.created_with["envs"]["SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS"] == "1"
+
+    box = sandbox(_Result(_ok_stdout()))
+    await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a", 1)
+    assert "SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS" not in box.created_with["envs"]
+
+
+async def test_force_hook_by_handoff_needs_the_commit_count(sandbox, monkeypatch):
+    monkeypatch.setenv("SEAT_GUARD_FORCE_EXHAUST_HANDOFF", "0")
+    box = sandbox(_Result(_ok_stdout()))
+    await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a", 0)
+    assert "SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS" not in box.created_with["envs"]
+
+
+# --- specs/011 F2: the reading's window reset reaches the workflow ------------
+
+async def test_success_result_carries_the_readings_reset_as_iso(sandbox):
+    sandbox(_Result(_ok_stdout(utilization_resets_at=1791831600)))
+    result = await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert result["utilization_resets_at"] == "2026-10-12T19:00:00+00:00"

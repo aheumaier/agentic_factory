@@ -3,12 +3,14 @@
 already produced upstream (Spec/Intake, §3.1, done manually), then opens
 a PR. See SKILL.md for what's deliberately deferred this pass.
 """
+import asyncio
 import contextlib
 import glob
 import json
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -37,8 +39,9 @@ IMPLEMENT_PROMPT = """/speckit-implement
 This branch may already hold work from an earlier run that was cut off \
 (specs/009: a run can hand off mid-task to another seat). Tasks already \
 marked `[X]` in tasks.md are done — skip them and continue with the first \
-task still marked `[ ]`. After finishing each task, mark it `[X]` in \
-tasks.md and commit right away with `git add -A && git commit`, so \
+task still marked `[ ]`. Mark each task `[X]` in tasks.md as soon as you \
+finish it — one task at a time, never several at once at the end. Each \
+time a task is marked done, a checkpoint commit is saved for you, so \
 finished work survives an interruption.
 
 After implementing, run this repo's existing tests/verification locally \
@@ -176,6 +179,91 @@ def all_tasks_done(checkout: Path, branch: str | None = None) -> bool:
     )
 
 
+_DONE_LINE_RE = re.compile(r"^\s*- \[[xX]\]\s*(.*)$", re.MULTILINE)
+_TASK_ID_RE = re.compile(r"T\d+")
+
+
+def _done_task_keys(checkout: Path, branch: str | None) -> list[tuple[str, str]]:
+    """Done checklist lines of the feature's tasks.md, in file order, each
+    keyed by (file, task ID) (Spec Kit: `- [X] T001 [P] ...`) or else
+    (file, its text). Per file: in the every-specs/*/tasks.md fallback, an
+    older spec's ticked T001 must not hide this feature's T001."""
+    keys: list[tuple[str, str]] = []
+    for path in _task_files(checkout, branch):
+        for text in _DONE_LINE_RE.findall(path.read_text()):
+            match = _TASK_ID_RE.match(text)
+            key = (str(path), match.group(0) if match else text.strip())
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def _git_identity(checkout: Path) -> list[str]:
+    """`git -c` fallbacks when no identity is configured — the sandbox image
+    sets none, and a harness commit can come before the model's first one
+    (specs/011 research R7). A configured identity always wins."""
+    configured = subprocess.run(
+        ["git", "config", "user.email"], cwd=checkout, capture_output=True, text=True,
+    ).stdout.strip()
+    if configured:
+        return []
+    return ["-c", "user.name=swe-agent", "-c", "user.email=swe-agent@users.noreply.github.com"]
+
+
+class TaskCheckpointer:
+    """Deterministic per-task checkpoints (specs/011 F1): called after every
+    streamed message, it commits the tree as `checkpoint: <IDs>` once the
+    feature's done-task set grows — finished work no longer depends on the
+    model remembering to commit. A clean tree (the model committed itself)
+    only records the IDs. A failed commit (e.g. index.lock while the model
+    commits at the same moment) is retried on the next message."""
+
+    def __init__(self, checkout: Path, branch: str) -> None:
+        self.checkout = checkout
+        self.branch = branch
+        # A predecessor seat's [X] tasks are already on the branch.
+        self.saved = set(_done_task_keys(checkout, branch))
+
+    def __call__(self) -> None:
+        try:
+            keys = _done_task_keys(self.checkout, self.branch)
+        except OSError:  # tasks.md mid-rewrite: try again on the next message
+            return
+        new = [key for key in keys if key not in self.saved]
+        if not new:
+            return
+        ids = [task for _, task in new if _TASK_ID_RE.fullmatch(task)]
+        if self._commit("checkpoint: " + (" ".join(ids) or "tasks")):
+            self.saved.update(new)
+
+    def finish(self) -> None:
+        """After a normal stream end: checkpoint new ticks, then commit any
+        edits made after the last one (verification fixes)."""
+        self()
+        self._commit("checkpoint: end of run")
+
+    def _commit(self, message: str) -> bool:
+        """Commit everything if the tree is dirty. True once nothing is left
+        uncommitted; a failure goes to stderr (stdout is the seat protocol)."""
+        try:
+            if not _run(["git", "status", "--porcelain"], cwd=self.checkout):
+                return True
+            _run(["git", "add", "-A"], cwd=self.checkout)
+            _run(["git", *_git_identity(self.checkout), "commit", "-m", message],
+                 cwd=self.checkout)
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"checkpoint commit failed, will retry: {e.stderr}", file=sys.stderr)
+            return False
+
+
+def _handoff_index() -> int:
+    """This seat's position within the Build invocation (SEAT_HANDOFF_INDEX,
+    specs/011 F5); 0 when unset, e.g. on the GitHub-comment path."""
+    value = os.environ.get("SEAT_HANDOFF_INDEX", "").strip()
+    return int(value) if value.isdigit() else 0
+
+
 def _seat_token() -> str | None:
     """The subscription-seat OAuth token, when this run is seat-backed
     (Temporal path, specs/009). Unset on the GitHub-comment path
@@ -210,11 +298,14 @@ def build_options(cwd: Path, seat_token: str | None = None) -> ClaudeAgentOption
 async def run_implement(
     checkout: Path, feedback: str | None = None, usage: dict | None = None,
     force_check: Callable[[], bool] | None = None,
+    on_message: Callable[[], None] | None = None,
 ) -> str:
     """Run /speckit-implement. In seat mode the stream goes through
     seat_guard, which records last-seen usage into `usage` and raises
     SeatExhausted/SeatInvalid on a seat outcome (specs/009). `force_check`
-    is seat_guard's test hook (SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS)."""
+    is seat_guard's test hook (SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS).
+    `on_message` runs after every message — before seat_guard polls
+    `force_check` for it, so the hook counts that message's checkpoint."""
     prompt = IMPLEMENT_PROMPT
     if feedback:
         prompt += FEEDBACK_PROMPT_SUFFIX.format(feedback=feedback)
@@ -234,6 +325,11 @@ async def run_implement(
     async with contextlib.aclosing(stream) as messages:
         async for message in messages:
             transcript.append(str(message))
+            if on_message is not None:
+                # Off the event loop: git (and a target repo's commit hooks)
+                # must not stall the SDK's stream readers. Still awaited, so
+                # it finishes before seat_guard resumes and polls force_check.
+                await asyncio.to_thread(on_message)
     return "\n".join(transcript)
 
 
@@ -343,13 +439,21 @@ async def run(
     else:
         n = force_exhaust_after_commits()
         force_check = (lambda: commits_since(checkout, sha_before) >= n) if n is not None else None
+        checkpointer = TaskCheckpointer(checkout, branch)
         try:
-            await run_implement(checkout, feedback, usage, force_check)
+            await run_implement(checkout, feedback, usage, force_check, checkpointer)
         except (SeatExhausted, SeatInvalid):
+            checkpointer()  # a tick the last message made, before pushing
             checkpoint_push(checkout, branch, sha_before)
             raise
         verify_left_main(checkout, branch)
-        verify_new_commit(checkout, sha_before)
+        checkpointer.finish()
+        # A successor seat (specs/011 F5) with every task done may find its
+        # predecessor already committed and pushed this attempt's work — e.g.
+        # a Gate-feedback fix. With tasks still open, no commit means no work:
+        # fail as on the first seat (the Eval-Gate never looks at the diff).
+        if _handoff_index() == 0 or has_open_tasks(checkout, branch):
+            verify_new_commit(checkout, sha_before)
     title = f"Implement {branch}"
     push_and_open_pr(checkout, repo, branch, title)
     return verify_pr_exists(repo, branch)
@@ -367,6 +471,8 @@ def _seat_status_line(status: str, usage: dict, **extra) -> str:
         **extra,
         "utilization": usage.get("utilization"),
         "rate_limit_type": usage.get("rate_limit_type"),
+        # specs/011 F2: when this reading stops describing the seat.
+        "utilization_resets_at": usage.get("utilization_resets_at"),
     })
 
 
@@ -397,9 +503,6 @@ async def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    import asyncio
-    import sys
-
     try:
         code = asyncio.run(main(sys.argv[1:]))
     finally:

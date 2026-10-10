@@ -163,7 +163,7 @@ The live test forces exhaustion on whichever seat runs a given handoff of the Bu
 - **A wait outlives the workflow's own limits.** Waits use durable timers, so a worker restart during a wait resumes it.
 - **A reset time in the past arrives as the earliest reset.** The stage asks again at once rather than waiting; it still counts as one wait.
 - **Old pool state.** State carried from 009 has no reading reset time; it is treated as unknown.
-- **Feedback retry where nobody commits.** On handoff index > 0, if the predecessor pushed nothing and the successor commits nothing, the Build proceeds to the pull request step and the unchanged branch is judged by the Eval-Gate (accepted gap, F5).
+- **Feedback retry where nobody commits.** On handoff index > 0 with every task done, if the predecessor pushed nothing and the successor commits nothing, the Build proceeds to the pull request step. Today's Eval-Gate does not look at the diff, so the unchanged branch can pass (accepted gap, F5; no worse than 009, where a model's no-op commit also passed).
 
 ## Requirements *(mandatory)*
 
@@ -202,7 +202,7 @@ The live test forces exhaustion on whichever seat runs a given handoff of the Bu
 **Feedback-retry handoff (F5)**
 
 - **FR-019**: Each seat-backed Build run MUST receive its handoff index (0 for the first seat of an invocation).
-- **FR-020**: When the handoff index is above 0, the Build MUST skip the "made no new commit" check.
+- **FR-020**: When the handoff index is above 0 and no task is left open, the Build MUST skip the "made no new commit" check. With tasks still open, a run without a new commit fails as on the first seat.
 
 **Test hook (F6)**
 

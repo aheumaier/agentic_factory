@@ -13,7 +13,7 @@ activities only, never in workflow code.
 """
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -75,10 +75,21 @@ def validate_pool(raw_seats: dict, raw_assignments: dict, source: str = "pool co
         if max_concurrent < 1:
             raise ValueError(f"{path}: seat {seat_id!r} max_concurrent must be >= 1")
         expires = cfg.get("token_expires_on")
+        if expires is not None:
+            # Fail fast on a value the worker's expiry warning and the pool's
+            # seats() query would choke on later (specs/011 F4). YAML gives a
+            # bare 2027-10-10 as a date; a timestamp or free text is rejected.
+            try:
+                expires = date.fromisoformat(str(expires)).isoformat()
+            except ValueError:
+                raise ValueError(
+                    f"{path}: seat {seat_id!r} token_expires_on must be a date "
+                    f"(YYYY-MM-DD), got {expires!r}"
+                ) from None
         seats[seat_id] = {
             "token_env": token_env,
             "max_concurrent": max_concurrent,
-            "token_expires_on": str(expires) if expires is not None else None,
+            "token_expires_on": expires,
         }
 
     assignments: dict[str, list[str]] = {}
@@ -116,11 +127,36 @@ def token_for(seat_id: str, pool: dict) -> str:
     return token
 
 
+# specs/011 F4: the worker warns at boot for a seat this close to (or past)
+# its token_expires_on — seat tokens are renewed by hand, about yearly.
+EXPIRY_WARN_DAYS = 14
+
+
+def expires_in_days(seat_cfg: dict, today: date) -> int | None:
+    """Days until the seat's credential expires (negative once expired), or
+    None when no expiry date is configured."""
+    expires = seat_cfg.get("token_expires_on")
+    return (date.fromisoformat(expires) - today).days if expires else None
+
+
+def expiring_seats(pool: dict, today: date) -> list[tuple[str, str, int]]:
+    """(seat_id, token_expires_on, days) for every seat within
+    EXPIRY_WARN_DAYS of expiry or past it — seat IDs and dates only."""
+    expiring = []
+    for seat_id, cfg in pool["seats"].items():
+        days = expires_in_days(cfg, today)
+        if days is not None and days <= EXPIRY_WARN_DAYS:
+            expiring.append((seat_id, cfg["token_expires_on"], days))
+    return expiring
+
+
 def new_seat_state() -> dict:
     return {
         "leases": {},  # lease_key -> acquired_at (ISO)
         "last_utilization": 0.0,
         "last_rate_limit_type": None,
+        # specs/011 F2: reset of the window that reading came from (ISO or None).
+        "utilization_resets_at": None,
         "exhausted_until": None,  # ISO or None
         "invalid": False,
     }
@@ -128,6 +164,16 @@ def new_seat_state() -> dict:
 
 def _parse(ts: str | None) -> datetime | None:
     return datetime.fromisoformat(ts) if ts else None
+
+
+def effective_utilization(seat_state: dict, now: datetime) -> float:
+    """The last-seen utilization, or 0.0 once the window it was read from
+    has reset (specs/011 F2) — a stale reading must not keep a seat avoided.
+    `.get`: state carried over from before 011 has no reset time."""
+    reset = _parse(seat_state.get("utilization_resets_at"))
+    if reset is not None and reset <= now:
+        return 0.0
+    return seat_state["last_utilization"]
 
 
 def active_leases(seat_state: dict, now: datetime, lease_ttl: timedelta = LEASE_TTL) -> int:
@@ -149,20 +195,25 @@ def is_eligible(seat_cfg: dict, seat_state: dict, now: datetime,
 
 def select_seat(seats: dict, state: dict, assignments: dict, agent: str,
                 now: datetime, lease_ttl: timedelta = LEASE_TTL) -> str | None:
-    """Pick the eligible seat assigned to `agent` with the lowest last-seen
-    utilization, tie-broken by the agent's assignment order. Pure."""
+    """Pick the eligible seat assigned to `agent` with the lowest effective
+    (reset-aware) utilization, tie-broken by the agent's assignment order. Pure."""
     candidates = [
-        (state[seat_id]["last_utilization"], index, seat_id)
+        (effective_utilization(state[seat_id], now), index, seat_id)
         for index, seat_id in enumerate(assignments.get(agent, []))
         if is_eligible(seats[seat_id], state[seat_id], now, lease_ttl)
     ]
     return min(candidates)[2] if candidates else None
 
 
-def earliest_reset(state: dict, now: datetime) -> str | None:
-    """Earliest future `exhausted_until` across seats (ISO), or None — e.g.
-    when every unavailable seat is invalid rather than exhausted."""
+def earliest_reset(state: dict, now: datetime, seat_ids: list[str] | None = None) -> str | None:
+    """Earliest future `exhausted_until` (ISO) among `seat_ids` (default: every
+    seat), skipping invalid seats — their reset brings them back no sooner;
+    or None, e.g. when every unavailable seat is invalid rather than
+    exhausted. specs/011 F3 sleeps on this value, so the caller passes the
+    requesting agent's own seats."""
     until = [datetime.fromisoformat(s["exhausted_until"])
-             for s in state.values() if s["exhausted_until"]]
+             for seat_id, s in state.items()
+             if (seat_ids is None or seat_id in seat_ids)
+             and not s["invalid"] and s["exhausted_until"]]
     future = [t for t in until if t > now]
     return min(future).isoformat() if future else None
