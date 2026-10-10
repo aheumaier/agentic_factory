@@ -13,7 +13,7 @@ weeks, waiting on a human to merge the registry PR) is wildly different from
 Build/Gate's minutes, so it runs in its own long-lived workflow instead of
 sharing this execution's history.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -64,6 +64,13 @@ _TRANSIENT_RETRY = RetryPolicy(
 # so it never charges MAX_BUILD_ATTEMPTS / MAX_PLAN_ATTEMPTS (FR-019).
 MAX_SEAT_HANDOFFS = 4
 
+# specs/011 F3: an empty pool waits for its earliest seat reset when that is
+# at most POOL_WAIT_HORIZON away, at most MAX_POOL_WAITS times per stage
+# invocation (gated by patch "seat-pool-wait-v1"); otherwise it fails fast
+# with CredentialPoolExhausted as in 009. A wait charges no budget.
+POOL_WAIT_HORIZON = timedelta(hours=6)
+MAX_POOL_WAITS = 2
+
 # The seat activities only call updates on CredentialPoolWorkflow and are
 # idempotent per lease key, so transient-retry them freely.
 _SEAT_ACTIVITY_OPTS = {
@@ -92,29 +99,42 @@ class AgentPipelineWorkflow:
         self._plan_feedback = feedback
 
     async def _with_seat(
-        self, agent: str, stage: str, invocation: int, activity_fn, args: list, **opts,
+        self, agent: str, stage: str, invocation: int, activity_fn, args: list,
+        *, with_handoff: bool = False, **opts,
     ) -> dict:
         """Run one seat-backed stage invocation on a credential-pool seat
         (specs/009, contracts/credential-pool-interface.md): lease a seat,
         run `activity_fn(*args, seat_id)`, release the seat with the usage
         the stage reported. On SeatExhausted/SeatInvalid the seat is reported
         to the pool (which drops the lease) and the stage re-runs on another
-        seat — the stage resumes from its own pushed checkpoints."""
+        seat — the stage resumes from its own pushed checkpoints.
+        `with_handoff` also passes the handoff index after `seat_id` (specs/011
+        F5/F6: Build's successor skips its "no new commit" check)."""
         workflow_id = workflow.info().workflow_id
+        waits = 0
         for handoff in range(MAX_SEAT_HANDOFFS + 1):
             lease_key = f"{workflow_id}/{stage}/{invocation}/{handoff}"
             lease = await self._pool_call(acquire_seat_activity, [agent, lease_key])
+            while lease["seat_id"] is None:
+                # specs/011 F3: a reset close enough is waited out durably —
+                # same lease key, no handoff and no stage budget charged.
+                delay = self._pool_wait(lease["earliest_reset"], waits)
+                if delay is None:
+                    raise ApplicationError(
+                        f"No credential-pool seat available for {agent} ({stage})",
+                        lease["earliest_reset"],
+                        type="CredentialPoolExhausted",
+                        non_retryable=True,
+                    )
+                waits += 1
+                await workflow.sleep(delay)
+                lease = await self._pool_call(acquire_seat_activity, [agent, lease_key])
             seat_id = lease["seat_id"]
-            if seat_id is None:
-                raise ApplicationError(
-                    f"No credential-pool seat available for {agent} ({stage})",
-                    lease["earliest_reset"],
-                    type="CredentialPoolExhausted",
-                    non_retryable=True,
-                )
             try:
                 result = await workflow.execute_activity(
-                    activity_fn, args=[*args, seat_id], **opts
+                    activity_fn,
+                    args=[*args, seat_id, *([handoff] if with_handoff else [])],
+                    **opts,
                 )
             except ActivityError as e:
                 kind = _SEAT_OUTCOMES.get(getattr(e.cause, "type", None))
@@ -133,7 +153,8 @@ class AgentPipelineWorkflow:
                 await self._release_seat(seat_id, lease_key, None, None)
                 raise
             await self._release_seat(
-                seat_id, lease_key, result.get("utilization"), result.get("rate_limit_type")
+                seat_id, lease_key, result.get("utilization"), result.get("rate_limit_type"),
+                result.get("utilization_resets_at"),
             )
             return result
         raise ApplicationError(
@@ -143,6 +164,22 @@ class AgentPipelineWorkflow:
             type="SeatHandoffsExhausted",
             non_retryable=True,
         )
+
+    @staticmethod
+    def _pool_wait(earliest_reset: str | None, waits: int) -> timedelta | None:
+        """How long to wait for the earliest seat reset before asking the
+        pool again (specs/011 F3), or None to fail fast: no known reset (e.g.
+        every seat invalid), a reset beyond POOL_WAIT_HORIZON (waiting toward
+        it only delays the same failure), or MAX_POOL_WAITS spent. patched()
+        runs last, so only runs that actually wait record its marker, and a
+        pre-011 history replays its fail-fast unchanged."""
+        if earliest_reset is None or waits >= MAX_POOL_WAITS:
+            return None
+        delay = datetime.fromisoformat(earliest_reset) - workflow.now()
+        if delay > POOL_WAIT_HORIZON or not workflow.patched("seat-pool-wait-v1"):
+            return None
+        # +1 s: a seat is eligible again only once exhausted_until <= now.
+        return max(delay, timedelta(0)) + timedelta(seconds=1)
 
     async def _pool_call(self, activity_fn, args: list):
         """A seat activity, its failure (after _TRANSIENT_RETRY) typed as the
@@ -165,13 +202,15 @@ class AgentPipelineWorkflow:
     async def _release_seat(
         self, seat_id: str, lease_key: str,
         utilization: float | None, rate_limit_type: str | None,
+        utilization_resets_at: str | None = None,
     ) -> None:
         """Best effort: a failed release must neither mask the stage's own
         outcome (its result, or its error) nor discard a finished stage. The
         lease then ages out via LEASE_TTL; only the usage figure is lost."""
         try:
             await self._pool_call(
-                release_seat_activity, [seat_id, lease_key, utilization, rate_limit_type],
+                release_seat_activity,
+                [seat_id, lease_key, utilization, rate_limit_type, utilization_resets_at],
             )
         except ApplicationError as e:
             workflow.logger.warning("Seat %s release failed: %s", seat_id, e)
@@ -287,6 +326,7 @@ class AgentPipelineWorkflow:
                 build = await self._with_seat(
                     "swe-agent", "build", attempt, run_swe_agent_activity,
                     [repo, branch, feedback],
+                    with_handoff=True,
                     start_to_close_timeout=timedelta(minutes=60),
                     retry_policy=_NO_AUTO_RETRY,
                 )

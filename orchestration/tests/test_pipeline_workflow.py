@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from temporalio import activity
@@ -33,6 +34,7 @@ from workflows.credential_pool import CredentialPoolWorkflow
 from workflows.pipeline_workflow import AgentPipelineWorkflow
 
 TASK_QUEUE = "agent-factory-pipeline-test"
+BUILD_READING_RESETS_AT = "2099-01-01T05:00:00+00:00"  # specs/011 F2
 REPO = "owner/repo"
 
 
@@ -172,14 +174,15 @@ def _stub_activities(calls: list, plan_outcomes: list, build_outcomes: list | No
 
     @activity.defn(name="run_swe_agent_activity")
     async def run_swe_agent_activity(
-        repo: str, branch: str, feedback: str | None, seat_id: str
+        repo: str, branch: str, feedback: str | None, seat_id: str, handoff: int = 0,
     ) -> dict:
-        calls.append(("run_swe_agent_activity", feedback, seat_id))
+        calls.append(("run_swe_agent_activity", feedback, seat_id, handoff))
         outcome = next(build_iter, None)
         if isinstance(outcome, Exception):
             raise outcome
         return {"pr_url": "https://github.com/owner/repo/pull/1", "seat_id": seat_id,
-                "utilization": 0.25, "rate_limit_type": "five_hour"}
+                "utilization": 0.25, "rate_limit_type": "five_hour",
+                "utilization_resets_at": BUILD_READING_RESETS_AT}
 
     @activity.defn(name="eval_gate_activity")
     async def eval_gate_activity(repo: str, branch: str, sandbox_trace: dict) -> dict:
@@ -702,3 +705,158 @@ async def test_cancel_during_seat_release_is_not_swallowed():
 
     assert isinstance(exc.value.cause, CancelledError)
     assert not _build_calls(calls)
+
+
+# --- specs/011-seat-pool-hardening ---------------------------------------------
+
+async def test_build_receives_handoff_index_but_architect_does_not():
+    """F5/F6: the Build activity gets its handoff index (0, then 1 for the
+    successor); the architect stage's signature is unchanged."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    activities = _stub_activities(
+        calls, [_plan_result()],
+        build_outcomes=[_seat_error("SeatExhausted", "seat-a", "2099-01-01T00:00:00+00:00")],
+    )
+
+    async with _harness(client, run_id, activities, _pool("seat-a", "seat-b")):
+        await _approve_and_result(client, run_id, await _start(client, run_id))
+
+    assert [(c[2], c[3]) for c in _build_calls(calls)] == [("seat-a", 0), ("seat-b", 1)]
+    assert ("architect_seat", "seat-a") in calls
+
+
+async def test_build_release_stores_the_readings_reset_time():
+    """F2: the Build result's utilization_resets_at reaches the pool's release."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+
+    async with _harness(client, run_id, activities) as pool:
+        await _approve_and_result(client, run_id, await _start(client, run_id))
+        table = await pool.query(CredentialPoolWorkflow.seats)
+
+    assert table["seat-a"]["last_utilization"] == 0.25
+    assert table["seat-a"]["utilization_resets_at"] == BUILD_READING_RESETS_AT
+
+
+def _acquire_stub(build_answers: list, build_calls: list):
+    """acquire_seat_activity stand-in: the architect stage always gets
+    seat-a; Build's acquires are answered from `build_answers` in order
+    (each a callable returning earliest_reset, or a seat id), the last one
+    repeating."""
+    @activity.defn(name="acquire_seat_activity")
+    async def acquire(agent: str, lease_key: str) -> dict:
+        if "/build/" not in lease_key:
+            return {"seat_id": "seat-a", "earliest_reset": None}
+        build_calls.append(lease_key)
+        answer = build_answers[min(len(build_calls), len(build_answers)) - 1]
+        if callable(answer):
+            return {"seat_id": None, "earliest_reset": answer()}
+        return {"seat_id": answer, "earliest_reset": None}
+    return acquire
+
+
+def _in(seconds: float):
+    return lambda: (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+
+
+async def test_empty_pool_waits_for_a_near_reset_then_builds():
+    """F3 / SC-004: no seat, reset in 2 s -> durable timer, same lease key,
+    then Build runs once on the seat; no Build attempt or plan charged."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    build_acquires: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+    acquire = _acquire_stub([_in(2), "seat-a"], build_acquires)
+
+    async with _harness(client, run_id, activities, seat_overrides=[acquire]):
+        handle = await _start(client, run_id)
+        result = await _approve_and_result(client, run_id, handle)
+        events = [e async for e in handle.fetch_history_events()]
+
+    assert result == "https://github.com/factory/repo/pull/2"
+    assert len(build_acquires) == 2 and len(set(build_acquires)) == 1  # same key, no handoff
+    assert [(c[1], c[2], c[3]) for c in _build_calls(calls)] == [(None, "seat-a", 0)]
+    assert len([c for c in calls if c[0] == "architect_stage_activity"]) == 1
+    assert any(e.event_type == EventType.EVENT_TYPE_TIMER_STARTED for e in events)
+
+
+async def test_empty_pool_without_known_reset_fails_at_once():
+    """F3: e.g. every seat invalid -> no reset time -> fail fast, no timer."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    build_acquires: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+    acquire = _acquire_stub([lambda: None], build_acquires)
+
+    async with _harness(client, run_id, activities, seat_overrides=[acquire]):
+        handle = await _start(client, run_id)
+        with pytest.raises(WorkflowFailureError) as exc:
+            await _approve_and_result(client, run_id, handle)
+        events = [e async for e in handle.fetch_history_events()]
+
+    assert exc.value.cause.type == "CredentialPoolExhausted"
+    assert list(exc.value.cause.details) == [None]
+    assert len(build_acquires) == 1
+    assert not any(e.event_type == EventType.EVENT_TYPE_TIMER_STARTED for e in events)
+
+
+async def test_empty_pool_with_a_far_reset_fails_at_once():
+    """F3: a reset beyond the 6 h horizon (e.g. a seven-day window) is not waited for."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    build_acquires: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+    acquire = _acquire_stub([_in(7 * 3600)], build_acquires)
+
+    async with _harness(client, run_id, activities, seat_overrides=[acquire]):
+        handle = await _start(client, run_id)
+        with pytest.raises(WorkflowFailureError) as exc:
+            await _approve_and_result(client, run_id, handle)
+
+    assert exc.value.cause.type == "CredentialPoolExhausted"
+    assert len(build_acquires) == 1
+
+
+async def test_empty_pool_fails_after_two_waits():
+    """F3: MAX_POOL_WAITS (2) spent -> CredentialPoolExhausted; Build never ran."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    build_acquires: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+    acquire = _acquire_stub([_in(1)], build_acquires)
+
+    async with _harness(client, run_id, activities, seat_overrides=[acquire]):
+        handle = await _start(client, run_id)
+        with pytest.raises(WorkflowFailureError) as exc:
+            await _approve_and_result(client, run_id, handle)
+
+    assert exc.value.cause.type == "CredentialPoolExhausted"
+    assert len(build_acquires) == 3  # first ask + one per wait
+    assert not _build_calls(calls)
+
+
+async def test_empty_pool_with_a_past_reset_asks_again_at_once_as_one_wait():
+    """F3 edge case: a reset already past still counts as a wait (bounded),
+    and the stage asks again after the 1 s margin, not later."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    build_acquires: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+    acquire = _acquire_stub([_in(-5), _in(-5), "seat-a"], build_acquires)
+
+    async with _harness(client, run_id, activities, seat_overrides=[acquire]):
+        handle = await _start(client, run_id)
+        result = await _approve_and_result(client, run_id, handle)
+
+    assert result == "https://github.com/factory/repo/pull/2"
+    assert len(build_acquires) == 3  # 2 waits, then the seat
+    assert [c[2] for c in _build_calls(calls)] == ["seat-a"]

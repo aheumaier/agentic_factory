@@ -66,7 +66,7 @@ plan attempt on another seat without charging `MAX_PLAN_ATTEMPTS`. Unlike
 Build, the architect stage has no checkpoints: a handoff re-runs the whole
 fan-out.
 
-**Usage constraint (binding):** internal, single-operator use only. The seats belong to the operator running this pipeline; neither the pipeline nor its seats are ever offered to third parties (Agent SDK terms). Rotating several subscription seats is a Consumer-Terms grey area the operator accepted knowingly (2026-10-10). This is not a supported product feature; see `specs/009-credential-pool-handoff/spec.md`.
+**Usage constraint (binding):** internal, single-operator use only. The seats belong to the operator running this pipeline; neither the pipeline nor its seats are ever offered to third parties (Agent SDK terms). Rotating several subscription seats is a Consumer-Terms grey area the operator accepted knowingly (2026-10-10). This is not a supported product feature; see `specs/009-credential-pool-handoff/spec.md` and `specs/011-seat-pool-hardening/spec.md`.
 
 ## Deviation from `docs/70-multi-agent-pipeline-design.md` §2
 
@@ -169,10 +169,11 @@ done — only the Architect stage moved.
   the same as `003-pm-agent-review-gate`'s.
 - **No checkpointing across a seat handoff.** A handoff re-runs the whole stage, so
   candidate work from the exhausted seat is discarded.
-- **No durable sleep-until-reset.** When every eligible seat is out, the run
-  fails with `CredentialPoolExhausted` (earliest reset in its details) instead
-  of waiting for the reset.
-- **No token-expiry alert.** `token_expires_on` in `pool.yaml` is recorded,
-  but nothing warns before a seat's `claude setup-token` token expires. An
-  expired token surfaces as `SeatInvalid`, and the operator re-runs
-  `reset_seat` after renewing it.
+- **Waiting for a reset is bounded (specs/011).** When every eligible seat is
+  out, the stage waits durably for the earliest reset, but only if that reset
+  is at most 6 h away, and at most twice per stage. Otherwise it fails with
+  `CredentialPoolExhausted` (earliest reset in its details).
+- **Token expiry is a log line only (specs/011).** The worker warns at
+  startup for any seat within 14 days of `token_expires_on`, and `seats()`
+  shows `expires_in_days`. An expired token surfaces as `SeatInvalid`; after
+  renewing it, the operator runs `reset_seat`.

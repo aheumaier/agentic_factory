@@ -9,6 +9,7 @@ test); git is real, against a local bare repo standing in for GitHub, so
 """
 import asyncio
 import json
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,7 +42,7 @@ def _isolated_env(monkeypatch):
     for var in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
         monkeypatch.setenv(var, "test@example.invalid")
     for var in ("CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN",
-                "SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS",
+                "SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS", "SEAT_HANDOFF_INDEX",
                 # set when run from inside a git hook; would redirect cwd= git calls
                 "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
         monkeypatch.delenv(var, raising=False)
@@ -51,16 +52,20 @@ def _isolated_env(monkeypatch):
 def origin(tmp_path, monkeypatch):
     """A bare origin with `feat-x` holding specs/001-x/tasks.md, and
     clone_and_checkout pointed at it. `.bare` is the origin path,
-    `.seed(text)` replaces tasks.md on origin's branch."""
+    `.seed(text, extra)` replaces tasks.md (plus any `extra` repo-relative
+    files) on origin's branch."""
     bare = tmp_path / "origin.git"
     _git("init", "--bare", "-b", "main", str(bare), cwd=tmp_path)
     seed = tmp_path / "seed"
     _git("clone", str(bare), str(seed), cwd=tmp_path)
 
-    def seed_tasks(text: str) -> None:
+    def seed_tasks(text: str, extra: dict[str, str] | None = None) -> None:
         tasks = seed / "specs" / "001-x" / "tasks.md"
         tasks.parent.mkdir(parents=True, exist_ok=True)
         tasks.write_text(text)
+        for rel, content in (extra or {}).items():
+            (seed / rel).parent.mkdir(parents=True, exist_ok=True)
+            (seed / rel).write_text(content)
         _git("checkout", "-B", BRANCH, cwd=seed)
         _git("add", "-A", cwd=seed)
         _git("commit", "-m", "seed", cwd=seed)
@@ -339,3 +344,505 @@ def test_checkpoint_push_follows_branch_not_head(origin, monkeypatch):
 def test_checkpoint_push_never_targets_main(tmp_path):
     with pytest.raises(RuntimeError, match="Refusing to checkpoint-push to 'main'"):
         swe_agent.checkpoint_push(tmp_path, "main", "abc123")
+
+
+# --- specs/011 F1: deterministic per-task checkpoints --------------------------
+
+THREE_TASKS = "# Tasks\n\n- [ ] T001 one\n- [ ] T002 two\n- [ ] T003 three\n"
+
+
+def _edit(cwd: Path, name: str) -> None:
+    (cwd / name).write_text(name)
+
+
+def _tick(cwd: Path, *ids: str) -> None:
+    tasks = cwd / "specs" / "001-x" / "tasks.md"
+    text = tasks.read_text()
+    for task_id in ids:
+        text = text.replace(f"- [ ] {task_id} ", f"- [X] {task_id} ")
+    tasks.write_text(text)
+
+
+def _scripted(*steps):
+    """Each step is a callable(cwd) run before yielding one message, or a
+    message (e.g. a RateLimitEvent) yielded as-is. The steps are the whole
+    Build: only the first session runs them, later ones (specs/011 F7-a's
+    per-task sessions) yield nothing."""
+    sessions: list = []
+
+    async def fake(*, prompt, options=None):
+        sessions.append(prompt)
+        if len(sessions) > 1:
+            return
+        cwd = Path(options.cwd)
+        for step in steps:
+            if callable(step):
+                step(cwd)
+                yield "tool result"
+            else:
+                yield step
+    return fake
+
+
+def _capture_log(monkeypatch) -> list:
+    """Stubs the PR step; records the subjects of the commits made in the
+    checkout (oldest first) at the moment it would push."""
+    subjects: list = []
+
+    def fake_push_and_open_pr(checkout, repo, branch, title):
+        log = _git("log", "--reverse", "--format=%s", f"origin/{branch}..HEAD", cwd=checkout)
+        subjects.extend(log.splitlines())
+        return "created"
+    monkeypatch.setattr(swe_agent, "push_and_open_pr", fake_push_and_open_pr)
+    monkeypatch.setattr(
+        swe_agent, "verify_pr_exists", lambda repo, branch: "https://github.com/o/r/pull/7",
+    )
+    return subjects
+
+
+def _origin_subjects(bare: Path, before: str) -> list[str]:
+    return _git("log", "--reverse", "--format=%s", f"{before}..{BRANCH}", cwd=bare).splitlines()
+
+
+def test_harness_checkpoints_each_tick_when_the_model_never_commits(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: _edit(cwd, "a.py"), lambda cwd: _tick(cwd, "T001"),
+        lambda cwd: _edit(cwd, "b.py"), lambda cwd: _tick(cwd, "T002"),
+        lambda cwd: _edit(cwd, "fixup.py"),  # after the last tick: end-of-session commit
+    ))
+
+    # One session (T001's) runs the whole script; T003's session does nothing.
+    assert _main() == 0
+    assert subjects == ["checkpoint: T001", "checkpoint: T002", "checkpoint: end of T001"]
+
+
+def test_model_commit_is_recorded_not_duplicated(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+
+    def model_finishes_t001(cwd):
+        _edit(cwd, "a.py")
+        _tick(cwd, "T001")
+        _git("add", "-A", cwd=cwd)
+        _git("commit", "-m", "model: T001", cwd=cwd)
+
+    monkeypatch.setattr(swe_agent, "query", _scripted(model_finishes_t001, lambda cwd: None))
+
+    assert _main() == 0
+    assert subjects == ["model: T001"]
+
+
+def test_batched_ticks_make_one_checkpoint_naming_both(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001", "T002")),
+    ))
+
+    assert _main() == 0
+    assert subjects == ["checkpoint: T001 T002"]
+
+
+def test_failed_checkpoint_is_retried_on_the_next_message(origin, monkeypatch, capsys):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+
+    def tick_while_model_holds_the_index(cwd):
+        _edit(cwd, "a.py")
+        _tick(cwd, "T001")
+        (cwd / ".git" / "index.lock").write_text("")
+
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        tick_while_model_holds_the_index,
+        lambda cwd: (cwd / ".git" / "index.lock").unlink(),
+    ))
+
+    assert _main() == 0
+    assert subjects == ["checkpoint: T001"]
+    assert "checkpoint commit failed, will retry" in capsys.readouterr().err
+
+
+def test_predecessor_ticks_are_not_checkpointed_again(origin, monkeypatch):
+    origin.seed(THREE_TASKS.replace("- [ ] T001", "- [X] T001"))
+    subjects = _capture_log(monkeypatch)
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: (_edit(cwd, "b.py"), _tick(cwd, "T002")),
+    ))
+
+    assert _main() == 0
+    assert subjects == ["checkpoint: T002"]
+
+
+def test_tick_without_task_id_gets_a_generic_checkpoint(origin, monkeypatch):
+    origin.seed("# Tasks\n\n- [ ] write the docs\n- [ ] ship it\n")
+    subjects = _capture_log(monkeypatch)
+
+    def tick_docs(cwd):
+        tasks = cwd / "specs" / "001-x" / "tasks.md"
+        tasks.write_text(tasks.read_text().replace("- [ ] write", "- [X] write"))
+        _edit(cwd, "docs.md")
+
+    monkeypatch.setattr(swe_agent, "query", _scripted(tick_docs))
+
+    assert _main() == 0
+    assert subjects == ["checkpoint: tasks"]
+
+
+def test_forced_exhaustion_fires_right_after_the_first_checkpoint(origin, monkeypatch, capsys):
+    """SC-002 / FR-005: exhaust-after-1-commit counts the harness checkpoint
+    of the same message, so T002 never starts and origin holds T001."""
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    monkeypatch.setenv("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS", "1")
+    before = _origin_head(origin.bare)
+    started: list = []
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001")),
+        lambda cwd: (started.append("T002"), _edit(cwd, "b.py"), _tick(cwd, "T002")),
+    ))
+
+    assert _main() == 75
+    assert _origin_subjects(origin.bare, before) == ["checkpoint: T001"]
+    assert started == []
+    assert _last_line(capsys)["seat_status"] == "exhausted"
+
+
+def test_seat_outcome_checkpoints_a_tick_the_consumer_never_saw(origin, monkeypatch):
+    """The tick lands, then the seat is rejected before another message:
+    the except branch's checkpoint still saves T001 before the push."""
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    before = _origin_head(origin.bare)
+
+    async def tick_then_rejected(*, prompt, options=None):
+        cwd = Path(options.cwd)
+        _edit(cwd, "a.py")
+        _tick(cwd, "T001")
+        yield _rejected()
+    monkeypatch.setattr(swe_agent, "query", tick_then_rejected)
+
+    assert _main() == 75
+    assert _origin_subjects(origin.bare, before) == ["checkpoint: T001"]
+
+
+def test_seat_outcome_leaves_unticked_edits_uncommitted(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    before = _origin_head(origin.bare)
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: _edit(cwd, "half-done.py"), _rejected(),
+    ))
+
+    assert _main() == 75
+    assert _origin_subjects(origin.bare, before) == []
+
+
+def test_checkpoint_uses_fallback_identity_when_none_is_configured(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    for var in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.delenv(var, raising=False)
+    authors: list = []
+
+    def fake_push_and_open_pr(checkout, repo, branch, title):
+        authors.append(_git("log", "-1", "--format=%an <%ae>", cwd=checkout))
+        return "created"
+    monkeypatch.setattr(swe_agent, "push_and_open_pr", fake_push_and_open_pr)
+    monkeypatch.setattr(swe_agent, "verify_pr_exists", lambda repo, branch: "u")
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001")),
+    ))
+
+    assert _main() == 0
+    assert authors == ["swe-agent <swe-agent@users.noreply.github.com>"]
+
+
+def test_prompt_asks_for_one_tick_per_task():
+    prompt = " ".join(swe_agent.IMPLEMENT_PROMPT.split())
+    assert "one task at a time" in prompt
+    assert "checkpoint commit is saved for you" in prompt
+
+
+# --- specs/011 F5: a successor seat skips the "no new commit" check ------------
+
+def test_successor_feedback_retry_without_new_commit_reaches_pr(origin, monkeypatch):
+    origin.seed(DONE_TASKS)
+    monkeypatch.setenv("SEAT_HANDOFF_INDEX", "1")
+    pr_calls: list = []
+    _stub_pr(monkeypatch, pr_calls)
+    monkeypatch.setattr(swe_agent, "query", _scripted(lambda cwd: None))
+
+    assert _main("coverage too low") == 0
+    assert pr_calls == [BRANCH]
+
+
+def test_first_seat_feedback_retry_without_new_commit_still_fails(origin, monkeypatch):
+    origin.seed(DONE_TASKS)
+    monkeypatch.setenv("SEAT_HANDOFF_INDEX", "0")
+    _stub_pr(monkeypatch)
+    monkeypatch.setattr(swe_agent, "query", _scripted(lambda cwd: None))
+
+    with pytest.raises(RuntimeError, match="made no new commit"):
+        _main("coverage too low")
+
+
+# --- specs/011 F2: the reading's own reset time travels in the status line -----
+
+def test_ok_line_carries_the_readings_window_reset(origin, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    _stub_pr(monkeypatch)
+    raw = {"unifiedWindows": {
+        "five_hour": {"utilization": 0.2, "resetsAt": 1791655200},
+        "seven_day": {"utilization": 0.4, "resetsAt": 1791831600},
+    }}
+    event = sdk.RateLimitEvent(sdk.RateLimitInfo(status="allowed", resets_at=1791655200, raw=raw))
+    monkeypatch.setattr(swe_agent, "query", _fake_query(event, ("commit", "t002")))
+
+    assert _main() == 0
+    status = json.loads(capsys.readouterr().out.strip().splitlines()[-2])
+    assert status["utilization"] == 0.4
+    assert status["utilization_resets_at"] == 1791831600
+
+
+def test_successor_with_open_tasks_and_no_commit_still_fails(origin, monkeypatch):
+    """F5 is scoped to "nothing left to do": a successor that leaves tasks
+    open and commits nothing did no work, and the Eval-Gate would not notice.
+    (The fixture's default tasks.md has T002 open.)"""
+    monkeypatch.setenv("SEAT_HANDOFF_INDEX", "1")
+    _stub_pr(monkeypatch)
+    monkeypatch.setattr(swe_agent, "query", _scripted(lambda cwd: None))
+
+    with pytest.raises(RuntimeError, match="made no new commit"):
+        _main()
+
+
+def test_older_specs_ticked_ids_do_not_hide_this_features_ticks(origin, monkeypatch):
+    """Fallback mode (no specs/<branch>/tasks.md): every Spec Kit tasks.md
+    starts at T001, so done-task keys are per file."""
+    origin.seed(THREE_TASKS, {"specs/000-old/tasks.md": "# Tasks\n\n- [X] T001 old\n"})
+    subjects = _capture_log(monkeypatch)
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001")),
+        lambda cwd: _edit(cwd, "b.py"),
+    ))
+
+    # "end of run": several task files keep the single session (F7-a, FR-026).
+    assert _main() == 0
+    assert subjects == ["checkpoint: T001", "checkpoint: end of run"]
+
+
+# --- specs/011 F7-a: one model session per open task ---------------------------
+
+def _raise(error):
+    def step(cwd):
+        raise error
+    return step
+
+
+def _task_sessions(calls: list, script: dict | None = None):
+    """A model that does what each per-task prompt asks: edits <ID>.py and
+    ticks the task the prompt names, never commits. `script` maps a task ID
+    to the steps (as in _scripted) to run instead. Records every prompt."""
+    async def fake(*, prompt, options=None):
+        calls.append(prompt)
+        cwd = Path(options.cwd)
+        match = re.search(r"only task (T\d+)", prompt)
+        task = match.group(1) if match else None
+        if script is not None and task in script:
+            steps = script[task]
+        else:
+            steps = [lambda cwd: _edit(cwd, f"{task}.py"), lambda cwd: _tick(cwd, task)]
+        for step in steps:
+            if callable(step):
+                step(cwd)
+                yield "tool result"
+            else:
+                yield step
+    return fake
+
+
+def _named(calls: list) -> list:
+    """The task each session's prompt names (None: not a per-task prompt)."""
+    return [m.group(1) if (m := re.search(r"only task (T\d+)", p)) else None for p in calls]
+
+
+def test_one_session_per_open_task_in_order_with_a_checkpoint_each(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001", "T002", "T003"]
+    assert all("specs/001-x/tasks.md" in p and not p.startswith("/speckit-implement")
+               for p in calls)
+    # The model never commits: every task still gets its own checkpoint.
+    assert subjects == ["checkpoint: T001", "checkpoint: T002", "checkpoint: T003"]
+
+
+def test_forced_exhaustion_after_one_commit_never_starts_t002(origin, monkeypatch, capsys):
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    monkeypatch.setenv("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS", "1")
+    before = _origin_head(origin.bare)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls))
+
+    assert _main() == 75
+    assert _named(calls) == ["T001"]
+    assert _origin_subjects(origin.bare, before) == ["checkpoint: T001"]
+    assert _last_line(capsys)["seat_status"] == "exhausted"
+
+
+@pytest.mark.parametrize(("outcome", "code"), [
+    (_rejected(), 75),
+    (_raise(sdk.ResultError("auth", data={"api_error_status": 401, "result": "bad"})), 77),
+])
+def test_seat_outcome_in_a_later_session_pushes_earlier_tasks(
+    origin, monkeypatch, capsys, outcome, code,
+):
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    before = _origin_head(origin.bare)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T002": [lambda cwd: _edit(cwd, "half-done.py"), outcome],
+    }))
+
+    assert _main() == code
+    assert _named(calls) == ["T001", "T002"]
+    assert _origin_subjects(origin.bare, before) == ["checkpoint: T001"]
+    assert _last_line(capsys)["seat_status"] == ("exhausted" if code == 75 else "invalid")
+
+
+def test_feedback_retry_keeps_one_speckit_session_with_open_tasks(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    _stub_pr(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _fake_query(("commit", "fix"), calls=calls))
+
+    assert _main("coverage too low") == 0
+    assert len(calls) == 1
+    assert calls[0]["prompt"].startswith("/speckit-implement")
+    assert "coverage too low" in calls[0]["prompt"]
+
+
+def test_predecessor_done_tasks_get_no_session(origin, monkeypatch):
+    origin.seed(THREE_TASKS.replace("- [ ] T001", "- [X] T001"))
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls))
+
+    assert _main() == 0
+    assert _named(calls) == ["T002", "T003"]
+    assert subjects == ["checkpoint: T002", "checkpoint: T003"]
+
+
+def test_task_ticked_ahead_in_an_earlier_session_is_skipped(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T001": [lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001", "T002"))],
+    }))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001", "T003"]
+    assert subjects == ["checkpoint: T001 T002", "checkpoint: T003"]
+
+
+def test_session_that_leaves_its_task_open_ends_the_loop(origin, monkeypatch, capsys):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T001": [lambda cwd: _edit(cwd, "a.py")],
+    }))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001"]
+    assert subjects == ["checkpoint: end of T001"]  # its edits are saved
+    assert "task T001 left open" in capsys.readouterr().err
+
+
+def test_tasks_md_removed_by_the_model_skips_the_rest_without_crashing(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    _stub_pr(monkeypatch)
+    calls: list = []
+
+    def tick_then_remove(cwd):
+        _edit(cwd, "a.py")
+        _tick(cwd, "T001")
+        (cwd / "specs" / "001-x" / "tasks.md").unlink()
+
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {"T001": [tick_then_remove]}))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001"]
+
+
+def test_open_task_without_id_keeps_one_speckit_session(origin, monkeypatch):
+    origin.seed(THREE_TASKS + "- [ ] ship it\n")
+    _stub_pr(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _fake_query(("commit", "all"), calls=calls))
+
+    assert _main() == 0
+    assert len(calls) == 1
+    assert calls[0]["prompt"].startswith("/speckit-implement")
+
+
+def test_per_task_prompt_names_the_branch_named_tasks_md(origin, monkeypatch):
+    """Production layout: specs/<branch>/tasks.md, not the glob fallback."""
+    origin.seed("# old\n", {f"specs/{BRANCH}/tasks.md": THREE_TASKS.replace(
+        "- [ ] T002", "- [X] T002").replace("- [ ] T003", "- [X] T003")})
+    _stub_pr(monkeypatch)
+    calls: list = []
+
+    def tick_t001(cwd):
+        tasks = cwd / "specs" / BRANCH / "tasks.md"
+        tasks.write_text(tasks.read_text().replace("- [ ] T001", "- [X] T001"))
+        _edit(cwd, "a.py")
+
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {"T001": [tick_t001]}))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001"]
+    assert f"from specs/{BRANCH}/tasks.md" in calls[0]
+
+
+def test_one_usage_reading_spans_all_sessions(origin, monkeypatch, capsys):
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    _stub_pr(monkeypatch)
+    raw = {"unifiedWindows": {"seven_day": {"utilization": 0.4, "resetsAt": 1791831600}}}
+    event = sdk.RateLimitEvent(sdk.RateLimitInfo(status="allowed", resets_at=1791831600, raw=raw))
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T001": [event, lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001"))],
+    }))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001", "T002", "T003"]
+    status = json.loads(capsys.readouterr().out.strip().splitlines()[-2])
+    assert status["utilization"] == 0.4  # read in session 1, reported after session 3
+
+
+def test_open_task_ids_none_when_an_open_task_has_no_id(tmp_path):
+    _tasks(tmp_path, "001-x", THREE_TASKS)
+    tasks_md = tmp_path / "specs" / "001-x" / "tasks.md"
+    assert swe_agent._open_task_ids(tasks_md) == ["T001", "T002", "T003"]
+    tasks_md.write_text(THREE_TASKS + "  - [ ] nested sub-step\n")
+    assert swe_agent._open_task_ids(tasks_md) is None
+    tasks_md.write_text("- [ ] T001a not a Spec Kit ID\n")
+    assert swe_agent._open_task_ids(tasks_md) is None
+
+
+def test_task_prompt_names_one_task_and_forbids_commit_and_push():
+    prompt = " ".join(swe_agent.TASK_PROMPT.format(
+        task="T002", tasks_md="specs/x/tasks.md").split())
+    assert prompt.startswith("Implement only task T002 from specs/x/tasks.md")
+    assert "mark T002 `[X]`" in prompt and "STOP" in prompt
+    assert "Do not commit" in prompt
+    assert "Do not run `git push`" in prompt

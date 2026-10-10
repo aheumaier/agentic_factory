@@ -67,28 +67,33 @@ def seat_options_env(token: str) -> dict[str, str]:
 
 
 def usage_from_rate_limit_info(info: Any) -> dict:
-    """{utilization, rate_limit_type, resets_at} from a RateLimitInfo.
+    """{utilization, rate_limit_type, resets_at, utilization_resets_at}
+    from a RateLimitInfo.
 
     The typed `utilization` field is empty in practice; real per-window
     figures live in `raw["unifiedWindows"]` (R2). The tightest window binds,
-    so take the max."""
+    so take the max. `resets_at` is the top-level (binding/rejected) reset;
+    `utilization_resets_at` is the reset of the window the utilization came
+    from — when that reading stops describing the seat (specs/011 F2)."""
     raw = getattr(info, "raw", None) or {}
+    resets_at = getattr(info, "resets_at", None) or raw.get("resetsAt")
     windows = raw.get("unifiedWindows") or {}
     scored = [
-        (float(w["utilization"]), name)
+        (float(w["utilization"]), name, w.get("resetsAt"))
         for name, w in windows.items()
         if isinstance(w, dict) and isinstance(w.get("utilization"), int | float)
     ]
     if scored:
-        utilization, rate_limit_type = max(scored)
+        utilization, rate_limit_type, window_reset = max(scored, key=lambda s: s[:2])
     else:
         utilization = getattr(info, "utilization", None)
         rate_limit_type = getattr(info, "rate_limit_type", None)
-    resets_at = getattr(info, "resets_at", None) or raw.get("resetsAt")
+        window_reset = None
     return {
         "utilization": utilization,
         "rate_limit_type": rate_limit_type,
         "resets_at": resets_at,
+        "utilization_resets_at": window_reset or resets_at,
     }
 
 
@@ -108,6 +113,10 @@ def _merge_usage(usage: dict, snapshot: dict) -> None:
     for key, value in snapshot.items():
         if value is not None:
             usage[key] = value
+    # A reading and its window's reset are one pair: a new reading never
+    # keeps an older reading's reset time (specs/011 F2).
+    if snapshot.get("utilization") is not None:
+        usage["utilization_resets_at"] = snapshot.get("utilization_resets_at")
 
 
 async def guarded_query(
