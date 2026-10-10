@@ -16,10 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 # Mirrors the dependencies in harness/swe-agent/pyproject.toml; the project
 # isn't pip-installable (no build-system), so they're named directly.
-RUN pip install --no-cache-dir "braintrust>=0.36.0" claude-agent-sdk
+RUN pip install --no-cache-dir "braintrust>=0.36.0" "claude-agent-sdk>=0.2.152"
 
 COPY harness/swe-agent/agent.py ./agent.py
+# Imported by agent.py as a sibling module (specs/009 seat guard).
+COPY harness/swe-agent/seat_guard.py ./seat_guard.py
 
-# ANTHROPIC_PLATFORM_API_KEY and GH_TOKEN are passed as sandbox env vars at
-# creation time (see .github/workflows/swe-agent-build.yml), never baked
-# into the image.
+# Credentials are passed as sandbox env vars at creation time, never baked
+# into the image: GH_TOKEN plus either CLAUDE_CODE_OAUTH_TOKEN (a credential-
+# pool seat, Temporal path — orchestration/activities.py, specs/009) or
+# ANTHROPIC_PLATFORM_API_KEY (GitHub-comment path,
+# .github/workflows/swe-agent-build.yml).

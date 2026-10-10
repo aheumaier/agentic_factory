@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 dependencies = [
     "aiohttp",              # webhook_bridge's HTTP server (specs/002-webhook-trigger-bridge)
     "braintrust>=0.36.0",  # imported by eval.config.py, which activities.py loads (§3.6)
-    "claude-agent-sdk",     # imported by harness/architect-agent/agent.py, which activities.py loads (004)
+    "claude-agent-sdk>=0.2.152",  # architect-agent/agent.py (loaded by activities.py) + its seat_guard need RateLimitEvent/ResultError (004, 009)
     "cryptography",         # RS256 key handling for the GitHub App JWT (webhook_bridge/github_app.py)
     "e2b",                 # Execution Sandbox the SWE-agent activity runs in (§3.3)
     "pyjwt",                # GitHub App JWT signing (webhook_bridge/github_app.py)
@@ -18,7 +18,11 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Fail (not hang) a stuck Temporal test: the .claude/hooks/py-check.sh gate
+# runs this suite on every .py edit.
+timeout = 60

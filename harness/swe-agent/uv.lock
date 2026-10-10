@@ -324,7 +324,7 @@ wheels = [
 
 [[package]]
 name = "claude-agent-sdk"
-version = "0.2.150"
+version = "0.2.165"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -332,13 +332,13 @@ dependencies = [
     { name = "mcp" },
     { name = "sniffio" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6d/1e/99bababecf24a4a55a0775665ff0be010aff26f653fc9be2f4f17a0b5ef0/claude_agent_sdk-0.2.150.tar.gz", hash = "sha256:3856e932f8d45514ddf5ddd540fb844678bb11638cabf9b939ce8b708e4eb352", size = 344692, upload-time = "2026-09-01T18:07:15.284Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7f/45/10f00a408b480926b5e340e3507562ede1e30d4ce5b73eea9ccc3468a9e6/claude_agent_sdk-0.2.165.tar.gz", hash = "sha256:1bfa8e7a6bb36e82de9a12324c9bcfa6eebd4f96ee5890f0c656d50445240ff8", size = 365169, upload-time = "2026-10-08T18:18:49.528Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c3/13/b5b86d90c95e8a691143eeb45bbf2e1c250324817980464d6ea63ef0f789/claude_agent_sdk-0.2.150-py3-none-macosx_11_0_arm64.whl", hash = "sha256:8f58d746f3552faeac52883b5a502a8d9b5aef067ea0b68fae5c9bae0f39d73d", size = 85396845, upload-time = "2026-09-01T18:07:19.074Z" },
-    { url = "https://files.pythonhosted.org/packages/d9/8f/c17da4fa9cd8bddb8ac1538456dd0fde3a43abb1dfc28ca448f85e2a10d3/claude_agent_sdk-0.2.150-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:fee3ae2dd457742d82070b5fa122070ee8e2e80b4f9b37a57ff0a8261ade656d", size = 89904483, upload-time = "2026-09-01T18:07:22.671Z" },
-    { url = "https://files.pythonhosted.org/packages/8d/95/5b33717b807c6fbe29fca55a246eab9a09a80c9dd288ffeb31f05681b7fc/claude_agent_sdk-0.2.150-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:813535a0267271d91af29c456ec26137b34a8b7bc066647ea59efba6e3c26c93", size = 95270310, upload-time = "2026-09-01T18:07:26.61Z" },
-    { url = "https://files.pythonhosted.org/packages/9f/de/5a8b59e6a713ea3f4be88816cfd487b1a5b08c8ad9f042abe56d2decc184/claude_agent_sdk-0.2.150-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:cb65ff33060baa098b420232c630fa287d0f95e9469e7ceb706d0b7d8841888e", size = 95460277, upload-time = "2026-09-01T18:07:31.092Z" },
-    { url = "https://files.pythonhosted.org/packages/dd/42/d147578a0df16c1b4b0deaebfb3d25e590ad5c16cb6b59a68f9dbb618be3/claude_agent_sdk-0.2.150-py3-none-win_amd64.whl", hash = "sha256:3b517a21c723854de778b38fa51660c5b68ee5fb6f28b2abf291a51471a7b378", size = 98078644, upload-time = "2026-09-01T18:07:35.734Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/a7/a7226ae5e7fa3f225d99a0acf12ee354c4af9c953661f66bbcd424e48853/claude_agent_sdk-0.2.165-py3-none-macosx_11_0_arm64.whl", hash = "sha256:7f7017bb59eaf77b9a7c7ce3b9ed2c8a397b8201c8630f011bb1b955290f06e4", size = 97973182, upload-time = "2026-10-08T18:18:56.039Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/9d/1eaa82f8dbafa63a3fb26aabc088be307c4977438269cc6cb10056a32e99/claude_agent_sdk-0.2.165-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:f4b5c6f536062e3af72357b1235f05ad4513230a32a3c639341a91a607d2df1e", size = 102479136, upload-time = "2026-10-08T18:19:01.908Z" },
+    { url = "https://files.pythonhosted.org/packages/40/4a/93fe172811bcd7704c4c4776d5eed1bb1881ba440d86e0f8e5cbbec0dca9/claude_agent_sdk-0.2.165-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:46a47e1e1075a8f2b7976f6bd5aa06c5610cb322c47cdc5b728fb25d02691164", size = 107447420, upload-time = "2026-10-08T18:19:09.571Z" },
+    { url = "https://files.pythonhosted.org/packages/57/81/a0d3ff04ae7045218566b36d1c78729c3fc7550877e154697f263ac5122e/claude_agent_sdk-0.2.165-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:9dbee4bfc69f0bb27ee455afdc19d78f958540a99217d2e28831fb9b7d496f08", size = 107800988, upload-time = "2026-10-08T18:19:16.24Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/d8/1685e8fc14bae5b9cbcfd6f4f6ca8b7ae8fd497a8bbf9c108978dd98620b/claude_agent_sdk-0.2.165-py3-none-win_amd64.whl", hash = "sha256:cf41dc1b1019bc7321b695d621fc94e6d8982c095cfb7d433d5c293e356a2404", size = 110401968, upload-time = "2026-10-08T18:19:24.136Z" },
 ]
 
 [[package]]
@@ -960,7 +960,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "braintrust", specifier = ">=0.36.0" },
-    { name = "claude-agent-sdk" },
+    { name = "claude-agent-sdk", specifier = ">=0.2.152" },
 ]
 
 [[package]]

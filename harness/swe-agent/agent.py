@@ -4,6 +4,7 @@ already produced upstream (Spec/Intake, §3.1, done manually), then opens
 a PR. See SKILL.md for what's deliberately deferred this pass.
 """
 import glob
+import json
 import os
 import re
 import subprocess
@@ -11,6 +12,10 @@ from pathlib import Path
 
 import braintrust
 from claude_agent_sdk import ClaudeAgentOptions, query
+
+# Sibling module, not a package: agent.py runs as a script (/app in the E2B
+# sandbox), so its own directory is on sys.path. specs/009.
+from seat_guard import guarded_query, seat_options_env
 
 # Observability (§3.8): same project as eval/braintrust/eval.config.py, so a
 # run's trace and its Eval-Gate score land side by side.
@@ -123,11 +128,22 @@ def verify_spec_exists(checkout: Path) -> None:
         )
 
 
-def build_options(cwd: Path) -> ClaudeAgentOptions:
+def _seat_token() -> str | None:
+    """The subscription-seat OAuth token, when this run is seat-backed
+    (Temporal path, specs/009). Unset on the GitHub-comment path
+    (swe-agent-build.yml), which still authenticates with an API key — seat
+    mode and its exit protocol stay off there."""
+    return os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or None
+
+
+def build_options(cwd: Path, seat_token: str | None = None) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         cwd=str(cwd),
         allowed_tools=["Bash", "Read", "Edit", "Write", "Grep", "Glob"],
         permission_mode="bypassPermissions",
+        # Seat mode: the seat token must be the only credential the CLI sees
+        # (an inherited API key/base URL would otherwise win, research R1).
+        env=seat_options_env(seat_token) if seat_token else {},
         # NOTE: setting_sources deliberately left at its default (loads
         # user/project/local settings, matching CLI defaults) — that's
         # also what makes /speckit-implement discoverable at all
@@ -143,12 +159,24 @@ def build_options(cwd: Path) -> ClaudeAgentOptions:
     )
 
 
-async def run_implement(checkout: Path, feedback: str | None = None) -> str:
+async def run_implement(
+    checkout: Path, feedback: str | None = None, usage: dict | None = None,
+) -> str:
+    """Run /speckit-implement. In seat mode the stream goes through
+    seat_guard, which records last-seen usage into `usage` and raises
+    SeatExhausted/SeatInvalid on a seat outcome (specs/009)."""
     prompt = IMPLEMENT_PROMPT
     if feedback:
         prompt += FEEDBACK_PROMPT_SUFFIX.format(feedback=feedback)
+    seat_token = _seat_token()
+    options = build_options(checkout, seat_token)
+    stream = (
+        guarded_query(prompt, options, usage if usage is not None else {}, query_fn=query)
+        if seat_token
+        else query(prompt=prompt, options=options)
+    )
     transcript: list[str] = []
-    async for message in query(prompt=prompt, options=build_options(checkout)):
+    async for message in stream:
         transcript.append(str(message))
     return "\n".join(transcript)
 
@@ -218,11 +246,14 @@ def verify_pr_exists(repo: str, branch: str) -> str:
     return urls[0]
 
 
-async def run(repo: str, branch: str, work_root: Path, feedback: str | None = None) -> str:
+async def run(
+    repo: str, branch: str, work_root: Path, feedback: str | None = None,
+    usage: dict | None = None,
+) -> str:
     checkout = clone_and_checkout(repo, branch, work_root)
     verify_spec_exists(checkout)
     sha_before = _head_sha(checkout)
-    await run_implement(checkout, feedback)
+    await run_implement(checkout, feedback, usage)
     verify_left_main(checkout, branch)
     verify_new_commit(checkout, sha_before)
     title = f"Implement {branch}"
@@ -238,8 +269,17 @@ if __name__ == "__main__":
     async def _main() -> None:
         repo, branch = sys.argv[1], sys.argv[2]
         feedback = sys.argv[3] if len(sys.argv) > 3 else None
+        usage: dict = {}
         with tempfile.TemporaryDirectory() as td:
-            pr_url = await run(repo, branch, Path(td), feedback)
+            pr_url = await run(repo, branch, Path(td), feedback, usage)
+            if _seat_token():
+                # Seat protocol (contracts/seat-guard-and-agent-protocol.md):
+                # seat_status line second-to-last, PR url stays last.
+                print(json.dumps({
+                    "seat_status": "ok",
+                    "utilization": usage.get("utilization"),
+                    "rate_limit_type": usage.get("rate_limit_type"),
+                }))
             print(pr_url)
 
     asyncio.run(_main())

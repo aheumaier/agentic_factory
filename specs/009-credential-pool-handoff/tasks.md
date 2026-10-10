@@ -25,9 +25,9 @@ description: "Task list for 009-credential-pool-handoff"
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Create the `orchestration/credentials/` package: an empty `orchestration/credentials/__init__.py`, and `orchestration/credentials/pool.yaml` with a single seat `seat-a: {token_env: CLAUDE_OAUTH_SEAT_A, max_concurrent: 2, token_expires_on: 2027-10-10}` and assignments `swe-agent: [seat-a]`, `architect-agent: [seat-a]`, `pm-agent: [seat-a]`. Add a header comment restating the single-operator usage constraint (spec "Usage Constraint") and that only the env var *name* lives here.
-- [ ] T002 [P] Add `CLAUDE_OAUTH_SEAT_A=` and `CLAUDE_OAUTH_SEAT_B=` placeholders to `.env.example`, with a comment on how to get a token (`claude setup-token`), its one-year expiry, and the single-operator constraint.
-- [ ] T003 [P] Pin `claude-agent-sdk>=0.2.152` in `harness/swe-agent/pyproject.toml` and `harness/architect-agent/pyproject.toml` (run `uv lock` in each), and on the pip line in `sandbox/swe-agent/Dockerfile`.
+- [X] T001 Create the `orchestration/credentials/` package: an empty `orchestration/credentials/__init__.py`, and `orchestration/credentials/pool.yaml` with a single seat `seat-a: {token_env: CLAUDE_OAUTH_SEAT_A, max_concurrent: 2, token_expires_on: 2027-10-10}` and assignments `swe-agent: [seat-a]`, `architect-agent: [seat-a]`, `pm-agent: [seat-a]`. Add a header comment restating the single-operator usage constraint (spec "Usage Constraint") and that only the env var *name* lives here.
+- [X] T002 [P] Add `CLAUDE_OAUTH_SEAT_A=` and `CLAUDE_OAUTH_SEAT_B=` placeholders to `.env.example`, with a comment on how to get a token (`claude setup-token`), its one-year expiry, and the single-operator constraint.
+- [X] T003 [P] Pin `claude-agent-sdk>=0.2.152` in `harness/swe-agent/pyproject.toml` and `harness/architect-agent/pyproject.toml` (run `uv lock` in each), and on the pip line in `sandbox/swe-agent/Dockerfile`.
 
 ---
 
@@ -35,7 +35,7 @@ description: "Task list for 009-credential-pool-handoff"
 
 **Purpose**: the pool core, the pool workflow and its activities, and the seat guard. Every user story depends on these.
 
-- [ ] T004 Implement `orchestration/credentials/pool.py`:
+- [X] T004 Implement `orchestration/credentials/pool.py`:
   - `load_pool(path=None)`: reads `CREDENTIAL_POOL_CONFIG`, else `pool.yaml` next to the module. It validates unknown, duplicate or `max_concurrent<1` seats and fails fast, and returns `{"seats":…, "assignments":…}` with plain JSON-safe types.
   - `select_seat(seats, state, assignments, agent, now, lease_ttl)`, pure, per data-model.md "Selection rule".
   - `active_leases(seat_state, now, lease_ttl)`.
@@ -44,21 +44,21 @@ description: "Task list for 009-credential-pool-handoff"
   - `LEASE_TTL = timedelta(hours=2)` and `DEFAULT_EXHAUST_WINDOW = timedelta(hours=1)`.
 
   Keep it free of Temporal imports so the workflow can import it through `imports_passed_through`.
-- [ ] T005 [P] Write base tests for `load_pool` (valid file, unknown seat in assignments, duplicate, `max_concurrent=0`) and `token_for` (set, unset, and an error message that never contains a value) in `orchestration/tests/test_credential_pool.py`.
-- [ ] T006 Implement `CredentialPoolWorkflow` in `orchestration/workflows/credential_pool.py` per contracts/credential-pool-interface.md:
+- [X] T005 [P] Write base tests for `load_pool` (valid file, unknown seat in assignments, duplicate, `max_concurrent=0`) and `token_for` (set, unset, and an error message that never contains a value) in `orchestration/tests/test_credential_pool.py`.
+- [X] T006 Implement `CredentialPoolWorkflow` in `orchestration/workflows/credential_pool.py` per contracts/credential-pool-interface.md:
   - updates `acquire` (idempotent per `lease_key`, prunes expired leases), `release`, `mark_exhausted`, `mark_invalid`, `reset_seat` and `reload_config`;
   - query `seats()`;
   - a main loop that calls `continue_as_new` with the config and state once `workflow.info().is_continue_as_new_suggested()`, after `workflow.all_handlers_finished()`.
 
   Use `workflow.now()` only, keep timestamps as ISO strings in state, import `credentials.pool` through `workflow.unsafe.imports_passed_through()`, and add the `§3.5` cross-reference in the module docstring.
-- [ ] T007 Add `acquire_seat_activity`, `release_seat_activity` and `report_seat_failure_activity` to `orchestration/activities.py`:
+- [X] T007 Add `acquire_seat_activity`, `release_seat_activity` and `report_seat_failure_activity` to `orchestration/activities.py`:
   - each resolves the pool through `activity.client().get_workflow_handle(os.environ.get("CREDENTIAL_POOL_ID", "credential-pool"))` and calls `execute_update`;
   - `acquire_seat_activity` returns `{"seat_id", "earliest_reset"}`, filling `earliest_reset` from the `seats()` query only when `seat_id` is None.
-- [ ] T008 Change `orchestration/worker.py`:
+- [X] T008 Change `orchestration/worker.py`:
   - register `CredentialPoolWorkflow` and the three activities;
   - before `worker.run()`, start the pool with `client.start_workflow(CredentialPoolWorkflow.run, load_pool(), id=pool_id, task_queue=TASK_QUEUE, id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)`;
   - call `load_dotenv(<repo>/.env)` explicitly at the top of `main()`. `make worker` loads no `.env`, and today the seat token only reaches `os.environ` as a side effect of `activities.py` loading the architect agent.
-- [ ] T009 Add pool-workflow tests against local Temporal, with `_connect_or_skip` and a per-test pool ID from `uuid`, in `orchestration/tests/test_credential_pool.py`:
+- [X] T009 Add pool-workflow tests against local Temporal, with `_connect_or_skip` and a per-test pool ID from `uuid`, in `orchestration/tests/test_credential_pool.py`:
   - acquire→release updates `last_utilization`;
   - a repeated acquire with the same `lease_key` returns the same seat;
   - `mark_exhausted`, after which `seats()` shows `exhausted_until`;
@@ -66,15 +66,15 @@ description: "Task list for 009-credential-pool-handoff"
   - `reset_seat` clears both.
 
   Run this task early: it is also the smoke test that the dev server accepts Workflow Updates. If it doesn't, set `frontend.enableUpdateWorkflowExecution` through dynamic config in `docker-compose.yml`.
-- [ ] T010 [P] Implement the canonical `harness/swe-agent/seat_guard.py` per contracts/seat-guard-and-agent-protocol.md:
+- [X] T010 [P] Implement the canonical `harness/swe-agent/seat_guard.py` per contracts/seat-guard-and-agent-protocol.md:
   - `SeatExhausted`/`SeatInvalid`, subclassing `Exception` directly;
   - `seat_options_env`, `usage_from_rate_limit_info` (max over `raw["unifiedWindows"]`, fallback, research R2), `classify_result_error` (research R3 rules, in order);
   - `guarded_query(prompt, options, usage)` wrapping `claude_agent_sdk.query` inside `contextlib.aclosing(...)`, so that raising mid-stream (a rejected event, or task cancellation) tears down the CLI subprocess and stops hitting an exhausted seat;
   - an optional force hook: `SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS` plus a `force_check()` callable the caller passes in, so the guard stays git-agnostic.
 
   Never log the token.
-- [ ] T011 [P] Copy `harness/swe-agent/seat_guard.py` byte-for-byte to `harness/architect-agent/seat_guard.py`.
-- [ ] T012 Write unit tests in `tests/test_seat_guard.py`:
+- [X] T011 [P] Copy `harness/swe-agent/seat_guard.py` byte-for-byte to `harness/architect-agent/seat_guard.py`.
+- [X] T012 Write unit tests in `tests/test_seat_guard.py`:
   - `classify_result_error`: 401, 403, "Failed to authenticate… OAuth access token is invalid", "login expired", 429, "usage limit reached", other → None;
   - `usage_from_rate_limit_info` with the R2 payload: max(0.26, 0.37) gives 0.37 / `seven_day`; missing `unifiedWindows` falls back; both missing gives None;
   - `seat_options_env` keys and values;
@@ -82,7 +82,7 @@ description: "Task list for 009-credential-pool-handoff"
   - the two `seat_guard.py` copies are byte-identical.
 
   Extend the SDK stub in `tests/conftest.py` with `RateLimitEvent`, `ResultError` and `ResultMessage` where needed.
-- [ ] T013 Add `orchestration/scripts/seat_smoke.py` (quickstart V4). It:
+- [X] T013 Add `orchestration/scripts/seat_smoke.py` (quickstart V4). It:
   - reads `CLAUDE_OAUTH_SEAT_A` from the repo `.env` with `dotenv_values`, never printing it;
   - poisons `os.environ` `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`;
   - imports `seat_guard` from `harness/swe-agent` by path, runs `guarded_query("Reply with exactly: OK", …)` with `tools=[]`, `setting_sources=[]`, `max_turns=1`;
@@ -100,12 +100,12 @@ description: "Task list for 009-credential-pool-handoff"
 
 **Independent Test**: one-seat pool → one Build → success, seat free again with `last_utilization` recorded, no token in history or logs (SC-001, SC-006, SC-007).
 
-- [ ] T014 [US1] In `harness/swe-agent/agent.py`:
+- [X] T014 [US1] In `harness/swe-agent/agent.py`:
   - seat mode is **conditional**. When `CLAUDE_CODE_OAUTH_TOKEN` is set, `build_options` merges `seat_options_env(token)` into `options.env` and `run_implement` iterates `guarded_query(…, usage)`. When it is unset (the GitHub-comment path via `swe-agent-build.yml`, which still passes an API key), options and the plain `query()` stay exactly as today, the guard is off, and an API-key 429 never becomes exit 75 (spec Out of Scope);
   - `run_implement` returns the transcript and `usage`;
   - on success, `__main__` prints `{"seat_status":"ok","utilization":…,"rate_limit_type":…}` as JSON right before the PR URL, which stays the last line.
-- [ ] T015 [US1] Add `COPY seat_guard.py /app/` to `sandbox/swe-agent/Dockerfile`, next to the `agent.py` copy.
-- [ ] T016 [US1] Change `run_swe_agent_activity` in `orchestration/activities.py`:
+- [X] T015 [US1] Add `COPY seat_guard.py /app/` to `sandbox/swe-agent/Dockerfile`, next to the `agent.py` copy.
+- [X] T016 [US1] Change `run_swe_agent_activity` in `orchestration/activities.py`:
   - new signature `(repo, branch, feedback, seat_id)`;
   - sandbox `envs={"CLAUDE_CODE_OAUTH_TOKEN": token_for(seat_id, load_pool()), "GH_TOKEN": …}`, with `ANTHROPIC_PLATFORM_API_KEY` removed;
   - `_COMMAND_TIMEOUT_SECONDS = 3300` for `sandbox.commands.run(…, timeout=…)`, and `_SANDBOX_TIMEOUT_SECONDS = 3500` for `AsyncSandbox.create`. That gives about 200 s of headroom so the sandbox can't expire during the push and PR tail, and both stay under the 60-min activity timeout (research R8);
@@ -113,7 +113,7 @@ description: "Task list for 009-credential-pool-handoff"
   - return `{"pr_url", "seat_id", "utilization", "rate_limit_type"}`.
 
   Keep the existing `RuntimeError` for non-zero exits for now; US2 adds 75/77. Catch `e2b.CommandExitException`, which replaces the dead `if result.exit_code != 0` branch.
-- [ ] T017 [US1] Add `async def _with_seat(self, agent, stage, invocation, activity_fn, args, **opts)` to `AgentPipelineWorkflow` in `orchestration/workflows/pipeline_workflow.py`, following the contract pseudocode:
+- [X] T017 [US1] Add `async def _with_seat(self, agent, stage, invocation, activity_fn, args, **opts)` to `AgentPipelineWorkflow` in `orchestration/workflows/pipeline_workflow.py`, following the contract pseudocode:
   - acquire;
   - run with `args + [seat_id]`;
   - release with the reported usage on success;
@@ -121,12 +121,12 @@ description: "Task list for 009-credential-pool-handoff"
   - raise `ApplicationError(type="CredentialPoolExhausted", non_retryable=True, details=[earliest_reset])` when acquire returns no seat.
 
   The handoff loop body for `SeatExhausted`/`SeatInvalid` lands in T024. Import the seat activities through the existing `imports_passed_through` block.
-- [ ] T018 [US1] Wire the Build call in `orchestration/workflows/pipeline_workflow.py`. Under `workflow.patched("seat-pool-v1")`, call `self._with_seat("swe-agent", "build", attempt, run_swe_agent_activity, [repo, branch, feedback], start_to_close_timeout=timedelta(minutes=60), retry_policy=_NO_AUTO_RETRY)` and pass `result["pr_url"]` to `eval_gate_activity`. The unpatched branch keeps today's call unchanged.
-- [ ] T019 [US1] Update `orchestration/tests/test_pipeline_workflow.py`:
+- [X] T018 [US1] Wire the Build call in `orchestration/workflows/pipeline_workflow.py`. Under `workflow.patched("seat-pool-v1")`, call `self._with_seat("swe-agent", "build", attempt, run_swe_agent_activity, [repo, branch, feedback], start_to_close_timeout=timedelta(minutes=60), retry_policy=_NO_AUTO_RETRY)` and pass `result["pr_url"]` to `eval_gate_activity`. The unpatched branch keeps today's call unchanged.
+- [X] T019 [US1] Update `orchestration/tests/test_pipeline_workflow.py`:
   - change the `run_swe_agent_activity` stub to the new signature and return the dict;
   - register a `CredentialPoolWorkflow` with a per-test ID, plus the real seat activities, using a test pool config written to `tmp_path` and exposed through `CREDENTIAL_POOL_CONFIG`/`CREDENTIAL_POOL_ID` monkeypatched env;
   - add a one-seat happy-path case asserting that the Build stub received `seat_id == "seat-a"` and that `seats()` afterwards shows 0 active leases and the stub's utilization.
-- [ ] T020 [P] [US1] Write `orchestration/tests/test_seat_activities.py`, covering `_parse_seat_status`: valid ok line, missing line gives None fields, malformed JSON gives None fields. Also check that the `run_swe_agent_activity` sandbox envs contain `CLAUDE_CODE_OAUTH_TOKEN` and not `ANTHROPIC_PLATFORM_API_KEY`, with `AsyncSandbox.create` mocked.
+- [X] T020 [P] [US1] Write `orchestration/tests/test_seat_activities.py`, covering `_parse_seat_status`: valid ok line, missing line gives None fields, malformed JSON gives None fields. Also check that the `run_swe_agent_activity` sandbox envs contain `CLAUDE_CODE_OAUTH_TOKEN` and not `ANTHROPIC_PLATFORM_API_KEY`, with `AsyncSandbox.create` mocked.
 
 **Checkpoint**: The one-seat happy path works end to end in the tests (SC-001). The live run needs E2B/GH (quickstart V5 prerequisites).
 
@@ -153,12 +153,12 @@ description: "Task list for 009-credential-pool-handoff"
   3. `sys.exit(75)` or `sys.exit(77)`.
 
   This requires `run()` to expose the checkout path and `sha_before` to the handler, for example through a small result or exception wrapper. Token scrubbing via `_scrubbed` applies to the push error.
-- [ ] T024 [US2] Extend `run_swe_agent_activity` in `orchestration/activities.py`:
+- [X] T024 [US2] Extend `run_swe_agent_activity` in `orchestration/activities.py`:
   - on `CommandExitException` with `exit_code==75`, raise `ApplicationError("seat exhausted", type="SeatExhausted", non_retryable=True, details=[seat_id, resets_at_iso])`;
   - on 77, raise `type="SeatInvalid"`, `details=[seat_id]`;
   - any other code raises `RuntimeError` as before;
   - forward `SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS` into the sandbox env only when `seat_id == os.environ.get("SEAT_GUARD_FORCE_EXHAUST_SEAT")`.
-- [ ] T025 [US2] Complete the handoff loop in `_with_seat` in `orchestration/workflows/pipeline_workflow.py`:
+- [X] T025 [US2] Complete the handoff loop in `_with_seat` in `orchestration/workflows/pipeline_workflow.py`:
   - add `MAX_SEAT_HANDOFFS = 4`;
   - on an `ActivityError` whose `cause.type` is in `{"SeatExhausted","SeatInvalid"}`, call `report_seat_failure_activity(seat_id, key, kind, resets_at)` and loop with `handoff+1`;
   - after the loop, raise `ApplicationError(type="SeatHandoffsExhausted", non_retryable=True, details=[stage, MAX_SEAT_HANDOFFS])`.
@@ -172,8 +172,8 @@ description: "Task list for 009-credential-pool-handoff"
   - **no-token branch:** with `CLAUDE_CODE_OAUTH_TOKEN` unset, options carry no seat env and the plain `query` is used.
 
   Load swe-agent's `agent.py` **by path under a distinct module name** with `tests/conftest.py`'s `_load_agent` (as `swe_agent`), never with `import agent`, which is already pm-agent in `sys.modules`. Put `harness/swe-agent` on `sys.path` first, or pre-load `seat_guard` by path, so its `import seat_guard` resolves.
-- [ ] T027 [P] [US2] Extend `orchestration/tests/test_seat_activities.py`: exit 75 → `SeatExhausted` with details; 77 → `SeatInvalid`; 1 → `RuntimeError`; the force hook is forwarded only for the matching seat.
-- [ ] T028 [US2] Add a handoff case to `orchestration/tests/test_pipeline_workflow.py`. Use a two-logical-seat test pool (`seat-a`, `seat-b`, both `token_env: CLAUDE_OAUTH_SEAT_A`, `max_concurrent: 1`). The Build stub raises `ApplicationError(type="SeatExhausted", non_retryable=True, details=["seat-a", None])` on the first call and succeeds on the second. Assert that:
+- [X] T027 [P] [US2] Extend `orchestration/tests/test_seat_activities.py`: exit 75 → `SeatExhausted` with details; 77 → `SeatInvalid`; 1 → `RuntimeError`; the force hook is forwarded only for the matching seat.
+- [X] T028 [US2] Add a handoff case to `orchestration/tests/test_pipeline_workflow.py`. Use a two-logical-seat test pool (`seat-a`, `seat-b`, both `token_env: CLAUDE_OAUTH_SEAT_A`, `max_concurrent: 1`). The Build stub raises `ApplicationError(type="SeatExhausted", non_retryable=True, details=["seat-a", None])` on the first call and succeeds on the second. Assert that:
   - the second call got `seat-b`;
   - Eval-Gate was called exactly once;
   - Build-attempt and plan-attempt counters are unchanged;
@@ -191,7 +191,7 @@ description: "Task list for 009-credential-pool-handoff"
 
 **Independent Test**: the `select_seat` matrix (SC-005), plus the `seats()` query contents.
 
-- [ ] T029 [P] [US3] Add the full `select_seat` matrix to `orchestration/tests/test_credential_pool.py`:
+- [X] T029 [P] [US3] Add the full `select_seat` matrix to `orchestration/tests/test_credential_pool.py`:
   - lowest utilization wins (0.7 vs 0.2);
   - tie → assignment order;
   - a seat shared across two agents;
@@ -201,7 +201,7 @@ description: "Task list for 009-credential-pool-handoff"
   - a lease older than `LEASE_TTL` doesn't count;
   - an agent with no assignment → None;
   - every seat ineligible → None.
-- [ ] T030 [US3] Add a pool-workflow test to `orchestration/tests/test_credential_pool.py` for the `seats()` query shape, which must not include the `token_env` value, plus `reload_config`: state is kept for surviving seat IDs, removed seats are dropped and new seats initialized.
+- [X] T030 [US3] Add a pool-workflow test to `orchestration/tests/test_credential_pool.py` for the `seats()` query shape, which must not include the `token_env` value, plus `reload_config`: state is kept for surviving seat IDs, removed seats are dropped and new seats initialized.
 
 **Checkpoint**: The selection rules are fully covered.
 
@@ -213,8 +213,8 @@ description: "Task list for 009-credential-pool-handoff"
 
 **Independent Test**: a one-seat pool plus forced exhaustion → `CredentialPoolExhausted` with earliest reset, work pushed, no budget charged (SC-004, SC-008).
 
-- [ ] T031 [US4] Add a one-seat case to `orchestration/tests/test_pipeline_workflow.py`. The Build stub raises `SeatExhausted(details=["seat-a", "<iso>"])`. Assert that the workflow fails with cause type `CredentialPoolExhausted`, that its details carry that ISO reset time, and that Eval-Gate was never called.
-- [ ] T032 [US4] Check `earliest_reset` in `orchestration/credentials/pool.py`. It returns the minimum future `exhausted_until` across seats, and None when no seat is exhausted, for example when all are invalid. Add a unit test for it in `orchestration/tests/test_credential_pool.py`.
+- [X] T031 [US4] Add a one-seat case to `orchestration/tests/test_pipeline_workflow.py`. The Build stub raises `SeatExhausted(details=["seat-a", "<iso>"])`. Assert that the workflow fails with cause type `CredentialPoolExhausted`, that its details carry that ISO reset time, and that Eval-Gate was never called.
+- [X] T032 [US4] Check `earliest_reset` in `orchestration/credentials/pool.py`. It returns the minimum future `exhausted_until` across seats, and None when no seat is exhausted, for example when all are invalid. Add a unit test for it in `orchestration/tests/test_credential_pool.py`.
 
 **Checkpoint**: pool exhaustion is a first-class, budget-neutral failure.
 

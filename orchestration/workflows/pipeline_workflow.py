@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError
 
 # activities.py loads eval/braintrust/eval.config.py via importlib at module
 # import time (Path.resolve(), exec_module) — real filesystem/non-
@@ -27,10 +27,13 @@ from temporalio.exceptions import ApplicationError
 # activities.py uses to run the SWE agent.
 with workflow.unsafe.imports_passed_through():
     from activities import (
+        acquire_seat_activity,
         architect_stage_activity,
         ensure_target_pr_activity,
         eval_gate_activity,
         register_activity,
+        release_seat_activity,
+        report_seat_failure_activity,
         run_swe_agent_activity,
     )
 
@@ -56,6 +59,19 @@ _TRANSIENT_RETRY = RetryPolicy(
     maximum_attempts=4,
 )
 
+# Credential-pool seat handoffs (specs/009) per stage invocation — a budget of
+# its own: a seat running out is neither a Build failure nor a plan failure,
+# so it never charges MAX_BUILD_ATTEMPTS / MAX_PLAN_ATTEMPTS (FR-019).
+MAX_SEAT_HANDOFFS = 4
+
+# The seat activities only call updates on CredentialPoolWorkflow and are
+# idempotent per lease key, so transient-retry them freely.
+_SEAT_ACTIVITY_OPTS = {
+    "start_to_close_timeout": timedelta(seconds=30),
+    "retry_policy": _TRANSIENT_RETRY,
+}
+_SEAT_OUTCOMES = {"SeatExhausted": "exhausted", "SeatInvalid": "invalid"}
+
 
 @workflow.defn
 class AgentPipelineWorkflow:
@@ -71,6 +87,73 @@ class AgentPipelineWorkflow:
     def plan_rejected(self, feedback: str) -> None:
         self._plan_decision = "rejected"
         self._plan_feedback = feedback
+
+    async def _with_seat(
+        self, agent: str, stage: str, invocation: int, activity_fn, args: list, **opts,
+    ) -> dict:
+        """Run one seat-backed stage invocation on a credential-pool seat
+        (specs/009, contracts/credential-pool-interface.md): lease a seat,
+        run `activity_fn(*args, seat_id)`, release the seat with the usage
+        the stage reported. On SeatExhausted/SeatInvalid the seat is reported
+        to the pool (which drops the lease) and the stage re-runs on another
+        seat — the stage resumes from its own pushed checkpoints."""
+        workflow_id = workflow.info().workflow_id
+        for handoff in range(MAX_SEAT_HANDOFFS + 1):
+            lease_key = f"{workflow_id}/{stage}/{invocation}/{handoff}"
+            lease = await workflow.execute_activity(
+                acquire_seat_activity, args=[agent, lease_key], **_SEAT_ACTIVITY_OPTS
+            )
+            seat_id = lease["seat_id"]
+            if seat_id is None:
+                raise ApplicationError(
+                    f"No credential-pool seat available for {agent} ({stage})",
+                    lease["earliest_reset"],
+                    type="CredentialPoolExhausted",
+                    non_retryable=True,
+                )
+            try:
+                result = await workflow.execute_activity(
+                    activity_fn, args=[*args, seat_id], **opts
+                )
+            except ActivityError as e:
+                kind = _SEAT_OUTCOMES.get(getattr(e.cause, "type", None))
+                if kind is None:
+                    await self._release_seat(seat_id, lease_key, None, None)
+                    raise
+                details = list(getattr(e.cause, "details", None) or [])
+                resets_at = details[1] if kind == "exhausted" and len(details) > 1 else None
+                await workflow.execute_activity(
+                    report_seat_failure_activity,
+                    args=[seat_id, lease_key, kind, resets_at],
+                    **_SEAT_ACTIVITY_OPTS,
+                )
+                continue
+            # Not BaseException: a workflow cancel (CancelledError) must
+            # propagate untouched; a leaked lease ages out via LEASE_TTL.
+            except Exception:
+                await self._release_seat(seat_id, lease_key, None, None)
+                raise
+            await self._release_seat(
+                seat_id, lease_key, result.get("utilization"), result.get("rate_limit_type")
+            )
+            return result
+        raise ApplicationError(
+            f"Seat handoff budget ({MAX_SEAT_HANDOFFS}) exhausted for {stage}",
+            stage,
+            MAX_SEAT_HANDOFFS,
+            type="SeatHandoffsExhausted",
+            non_retryable=True,
+        )
+
+    async def _release_seat(
+        self, seat_id: str, lease_key: str,
+        utilization: float | None, rate_limit_type: str | None,
+    ) -> None:
+        await workflow.execute_activity(
+            release_seat_activity,
+            args=[seat_id, lease_key, utilization, rate_limit_type],
+            **_SEAT_ACTIVITY_OPTS,
+        )
 
     @workflow.run
     async def run(self, repo: str, branch: str, agent_name: str, version: str) -> str:
@@ -152,12 +235,23 @@ class AgentPipelineWorkflow:
         eval_result: dict = {}
 
         for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
-            pr_url = await workflow.execute_activity(
-                run_swe_agent_activity,
-                args=[repo, branch, feedback],
-                start_to_close_timeout=timedelta(minutes=20),
-                retry_policy=_NO_AUTO_RETRY,
-            )
+            if workflow.patched("seat-pool-v1"):
+                # Build on a credential-pool seat (specs/009); seat handoffs
+                # happen inside _with_seat and never charge this loop.
+                build = await self._with_seat(
+                    "swe-agent", "build", attempt, run_swe_agent_activity,
+                    [repo, branch, feedback],
+                    start_to_close_timeout=timedelta(minutes=60),
+                    retry_policy=_NO_AUTO_RETRY,
+                )
+                pr_url = build["pr_url"]
+            else:
+                pr_url = await workflow.execute_activity(
+                    run_swe_agent_activity,
+                    args=[repo, branch, feedback],
+                    start_to_close_timeout=timedelta(minutes=20),
+                    retry_policy=_NO_AUTO_RETRY,
+                )
             eval_result = await workflow.execute_activity(
                 eval_gate_activity,
                 args=[repo, branch, {"pr_url": pr_url, "exit_code": 0}],

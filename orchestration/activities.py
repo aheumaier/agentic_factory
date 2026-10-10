@@ -10,13 +10,16 @@ import shlex
 import subprocess
 import tempfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
 import yaml
-from e2b import AsyncSandbox
+from e2b import AsyncSandbox, CommandExitException
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
+
+from credentials.pool import earliest_reset, load_pool, token_for
 
 # Mirrors harness/swe-agent/agent.py's own _REPO_RE/_BRANCH_RE: repo/branch
 # are workflow inputs threaded into a shell command run inside the sandbox
@@ -29,7 +32,16 @@ _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./-]*$")
 # E2B template built from sandbox/swe-agent/Dockerfile (§3.3); id is
 # sandbox/swe-agent/e2b.toml's `template_id`.
 _SANDBOX_TEMPLATE = "swe-agent-sandbox"
-_SANDBOX_TIMEOUT_SECONDS = 900
+# Command budget for agent.py inside the sandbox; e2b's commands.run defaults
+# to 60 s, which would kill any real Build. The sandbox itself lives ~200 s
+# longer so it can't expire during agent.py's push/PR tail, and both stay
+# under the Build activity's 60-min start_to_close_timeout (research R8).
+_COMMAND_TIMEOUT_SECONDS = 3300
+_SANDBOX_TIMEOUT_SECONDS = 3500
+
+# agent.py's seat-outcome exit codes (contracts/seat-guard-and-agent-protocol.md).
+_EXIT_SEAT_EXHAUSTED = 75  # EX_TEMPFAIL
+_EXIT_SEAT_INVALID = 77  # EX_NOPERM
 
 # Deterministic head branches, so a replayed/retried activity finds its own
 # already-open PR (see _open_factory_pr) instead of stacking duplicates.
@@ -67,32 +79,135 @@ def _clone_url(repo: str) -> str:
     return f"https://{credential}github.com/{repo}.git"
 
 
+def _pool_handle():
+    """The long-lived CredentialPoolWorkflow (specs/009), addressed by ID."""
+    pool_id = os.environ.get("CREDENTIAL_POOL_ID", "credential-pool")
+    return activity.client().get_workflow_handle(pool_id)
+
+
 @activity.defn
-async def run_swe_agent_activity(repo: str, branch: str, feedback: str | None = None) -> str:
-    """Build + Sandbox Test collapsed (§3.2 + §3.3). Not idempotent —
-    may already have pushed/opened a PR on partial failure.
-    Workflow sets maximum_attempts=1."""
+async def acquire_seat_activity(agent: str, lease_key: str) -> dict:
+    """Lease a subscription seat for one stage invocation (specs/009).
+    Idempotent per lease_key, so Temporal may retry it freely. Returns
+    {"seat_id", "earliest_reset"} — the latter only when no seat is free."""
+    handle = _pool_handle()
+    seat_id = await handle.execute_update("acquire", args=[agent, lease_key])
+    reset = None
+    if seat_id is None:
+        # Future resets only: past exhaustion marks are never cleared.
+        reset = earliest_reset(await handle.query("seats"), datetime.now(UTC))
+    return {"seat_id": seat_id, "earliest_reset": reset}
+
+
+@activity.defn
+async def release_seat_activity(
+    seat_id: str, lease_key: str, utilization: float | None, rate_limit_type: str | None,
+) -> None:
+    """Return a seat to the pool with its last-seen usage. No-op if not held."""
+    await _pool_handle().execute_update(
+        "release", args=[seat_id, lease_key, utilization, rate_limit_type]
+    )
+
+
+@activity.defn
+async def report_seat_failure_activity(
+    seat_id: str, lease_key: str, kind: str, resets_at_iso: str | None,
+) -> None:
+    """Mark a seat exhausted (until resets_at) or invalid; also drops the lease."""
+    if kind == "exhausted":
+        await _pool_handle().execute_update(
+            "mark_exhausted", args=[seat_id, lease_key, resets_at_iso]
+        )
+    elif kind == "invalid":
+        await _pool_handle().execute_update("mark_invalid", args=[seat_id, lease_key])
+    else:
+        raise ApplicationError(
+            f"unknown seat failure kind {kind!r}",
+            type="UnknownSeatFailureKind", non_retryable=True,
+        )
+
+
+def _parse_seat_status(stdout: str) -> dict:
+    """The last `{"seat_status": ...}` JSON line agent.py printed, or {}."""
+    for line in reversed((stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and '"seat_status"' in line:
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _epoch_to_iso(epoch: int | float | None) -> str | None:
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=UTC).isoformat()
+
+
+def _sandbox_envs(seat_id: str) -> dict[str, str]:
+    envs = {
+        "CLAUDE_CODE_OAUTH_TOKEN": token_for(seat_id, load_pool()),
+        "GH_TOKEN": os.environ["GH_TOKEN"],
+    }
+    # Live-handoff test hook (quickstart V5): forced exhaustion only on the
+    # one named seat, so the successor on another seat runs normally.
+    force = os.environ.get("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS")
+    if force and seat_id == os.environ.get("SEAT_GUARD_FORCE_EXHAUST_SEAT"):
+        envs["SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS"] = force
+    return envs
+
+
+@activity.defn
+async def run_swe_agent_activity(
+    repo: str, branch: str, feedback: str | None, seat_id: str,
+) -> dict:
+    """Build + Sandbox Test collapsed (§3.2 + §3.3) on credential-pool seat
+    `seat_id` (specs/009). Not idempotent — may already have pushed/opened a
+    PR on partial failure. Workflow sets maximum_attempts=1.
+
+    Returns {"pr_url", "seat_id", "utilization", "rate_limit_type"}. A seat
+    outcome (agent.py exit 75/77 — it has already pushed its committed
+    checkpoints) is raised as a typed, non-retryable ApplicationError the
+    workflow's _with_seat hands off on; the seat token itself only ever
+    travels in the sandbox env, never in a payload or message."""
     _validate_target(repo, branch)
 
     sandbox = await AsyncSandbox.create(
         template=_SANDBOX_TEMPLATE,
         timeout=_SANDBOX_TIMEOUT_SECONDS,
-        envs={
-            "ANTHROPIC_PLATFORM_API_KEY": os.environ["ANTHROPIC_PLATFORM_API_KEY"],
-            "GH_TOKEN": os.environ["GH_TOKEN"],
-        },
+        envs=_sandbox_envs(seat_id),
     )
     try:
         argv = ["python3", "/app/agent.py", repo, branch]
         if feedback:
             argv.append(feedback)
-        result = await sandbox.commands.run(shlex.join(argv))
-        if result.exit_code != 0:
-            raise RuntimeError(
-                f"sandbox run failed ({result.exit_code}): "
-                f"{result.stderr or result.stdout}"
+        try:
+            result = await sandbox.commands.run(
+                shlex.join(argv), timeout=_COMMAND_TIMEOUT_SECONDS
             )
-        return result.stdout.strip().splitlines()[-1]  # agent.py prints PR url last
+        except CommandExitException as e:
+            status = _parse_seat_status(e.stdout)
+            if e.exit_code == _EXIT_SEAT_EXHAUSTED:
+                raise ApplicationError(
+                    "seat exhausted", seat_id, _epoch_to_iso(status.get("resets_at")),
+                    type="SeatExhausted", non_retryable=True,
+                ) from None
+            if e.exit_code == _EXIT_SEAT_INVALID:
+                raise ApplicationError(
+                    "seat invalid", seat_id, type="SeatInvalid", non_retryable=True,
+                ) from None
+            raise RuntimeError(
+                f"sandbox run failed ({e.exit_code}): {e.stderr or e.stdout}"
+            ) from None
+        status = _parse_seat_status(result.stdout)
+        return {
+            "pr_url": result.stdout.strip().splitlines()[-1],  # agent.py prints PR url last
+            "seat_id": seat_id,
+            "utilization": status.get("utilization"),
+            "rate_limit_type": status.get("rate_limit_type"),
+        }
     finally:
         await sandbox.kill()
 

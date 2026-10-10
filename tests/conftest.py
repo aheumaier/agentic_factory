@@ -36,8 +36,41 @@ if "claude_agent_sdk" not in sys.modules:
         )
         yield  # pragma: no cover - keeps this an async generator
 
+    class RateLimitInfo:
+        def __init__(self, status="allowed", resets_at=None, rate_limit_type=None,
+                     utilization=None, raw=None):
+            self.status = status
+            self.resets_at = resets_at
+            self.rate_limit_type = rate_limit_type
+            self.utilization = utilization
+            self.raw = raw or {}
+
+    class RateLimitEvent:
+        def __init__(self, rate_limit_info):
+            self.rate_limit_info = rate_limit_info
+
+    class ResultMessage:
+        def __init__(self, result=None, is_error=False):
+            self.result = result
+            self.is_error = is_error
+
+    class ProcessError(Exception):
+        pass
+
+    class ResultError(ProcessError):
+        # Mirrors claude_agent_sdk._errors.ResultError: NOT a RuntimeError.
+        def __init__(self, message, data=None, exit_code=None):
+            super().__init__(message)
+            self.data = data
+            self.exit_code = exit_code
+
     _sdk_stub.ClaudeAgentOptions = ClaudeAgentOptions
     _sdk_stub.query = query
+    _sdk_stub.RateLimitInfo = RateLimitInfo
+    _sdk_stub.RateLimitEvent = RateLimitEvent
+    _sdk_stub.ResultMessage = ResultMessage
+    _sdk_stub.ProcessError = ProcessError
+    _sdk_stub.ResultError = ResultError
     sys.modules["claude_agent_sdk"] = _sdk_stub
 
 if "dotenv" not in sys.modules:
