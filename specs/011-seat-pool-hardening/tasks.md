@@ -124,8 +124,8 @@
 - [X] T029 [US2] Rebuild the `swe-agent-sandbox` E2B template and verify the sha256 of `/app/agent.py` and `/app/seat_guard.py` against the repo files
 - [X] T030 [US2] Cut fixture branch `v5-seat-handoff-3` from scratch-repo commit `fe874169` (rename the spec dir, update feature.json and spec.md) and push it from a temporary clone, with the token redacted
 - [X] T031 [US2] Check headroom with orchestration/scripts/seat_smoke.py (PASS, utilization below about 0.8); start the worker per quickstart V5 step 4; start the run, approve the plan after checking that tasks.md is a checklist, and wait for completion
-- [ ] T032 [US2] Run `.handoff/v5/v5_verify.py` (IDs set to `v5-seat-handoff-run-3` and `credential-pool-v5b`) with the worker log; check the pass criteria against the remote branch's commit log; record the results in specs/011-seat-pool-hardening/quickstart.md "Results"
-  - Results are recorded in quickstart.md ("V5 re-run 3"). Pass criteria 1 and 3 are **not met**: the model batched T001–T003 into one tick, so the single checkpoint held all three tasks and the successor had nothing left to resume. This waits on the operator's F7 ruling (spec.md).
+- [X] T032 [US2] Run `.handoff/v5/v5_verify.py` (IDs set to `v5-seat-handoff-run-3` and `credential-pool-v5b`) with the worker log; check the pass criteria against the remote branch's commit log; record the results in specs/011-seat-pool-hardening/quickstart.md "Results"
+  - Results are recorded in quickstart.md ("V5 re-run 3"). Pass criteria 1 and 3 are **not met**: the model batched T001–T003 into one tick, so the single checkpoint held all three tasks and the successor had nothing left to resume. The operator ruled F7-a on 2026-10-11 (Phase 11). V5 run 4 then met every criterion (quickstart.md "V5 re-run 4"), which closes this task.
 - [X] T033 [US2] Stop the worker, terminate `credential-pool-v5b`, and remove the temporary clones
 
 ---
@@ -140,8 +140,8 @@
 - [X] T035 In harness/swe-agent/agent.py: add `TASK_PROMPT` and `_open_task_ids()`; give `run_implement` a `prompt` parameter (default `IMPLEMENT_PROMPT`); add `run_per_task()` (IDs read once, skip ones already ticked, `checkpointer.finish(<ID>)` after each session, stop when a session leaves its task open); in `run()`, use it only without feedback, with one task file and an ID on every open task, inside the existing seat-outcome `try`
 - [X] T036 Tests in tests/test_swe_agent_seat.py: one session per open task in order, each prompt naming its task; a checkpoint per task when the model never commits; force-after-1-commit stops after `checkpoint: T001` and T002's session never starts; a seat outcome in the second session pushes `checkpoint: T001` and exits 75/77; the feedback retry uses one `/speckit-implement` session even with open tasks; predecessor `[X]` tasks get no session; a task ticked ahead is skipped; a session that leaves its task open ends the loop with its edits saved; make `_scripted` run its steps in the first session only
 - [X] T037 Run `py-codereviewer` on the F7-a diff; fix confirmed findings (at most two rounds each); update harness/swe-agent/SKILL.md and the CLAUDE.md swe-agent row
-- [ ] T038 Commit, rebuild the `swe-agent-sandbox` template, and verify the sha256 of `/app/agent.py` and `/app/seat_guard.py` in a credential-less sandbox
-- [ ] T039 [US2] V5 run 4 (`v5-seat-handoff-run-4`, fixture branch `v5-seat-handoff-4`, pool `credential-pool-v5c`): check headroom, run, verify (closes T032), record "V5 re-run 4" in quickstart.md, then clean up (worker, pool workflow, `.git/info/exclude`) and re-run the full gate
+- [X] T038 Commit, rebuild the `swe-agent-sandbox` template, and verify the sha256 of `/app/agent.py` and `/app/seat_guard.py` in a credential-less sandbox
+- [X] T039 [US2] V5 run 4 (`v5-seat-handoff-run-4`, fixture branch `v5-seat-handoff-4`, pool `credential-pool-v5c`): check headroom, run, verify (closes T032), record "V5 re-run 4" in quickstart.md, then clean up (worker, pool workflow, `.git/info/exclude`) and re-run the full gate
 
 ---
 

@@ -4,7 +4,7 @@
 
 **Created**: 2026-10-10
 
-**Status**: Draft
+**Status**: Implemented (2026-10-11; V5 run 4 passed, see quickstart.md)
 
 **Input**: User description: "Seat-pool hardening: close the follow-ups and known gaps of specs/009-credential-pool-handoff. F1 (highest priority, SC-002's core promise): the Build harness commits a checkpoint deterministically whenever a task is newly marked done, instead of relying on the model to commit per task. F2: stale utilization. F3: wait durably when every seat is exhausted. F4: token-expiry warning. F5: a Gate-feedback retry that hands off must not fail the 'no new commit' check. F6: a test hook that forces whichever seat runs a given handoff. Plus a live re-run proving mid-task resume."
 

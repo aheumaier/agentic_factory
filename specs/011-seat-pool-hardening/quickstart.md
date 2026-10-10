@@ -109,6 +109,50 @@ Secrecy (SC-007): 0 hits for every `.env` secret value and the `sk-ant-oat` pref
 
 **What the checkpoint holds.** `cfaecde` changes `tasks.md` (+3/-3), the three `wordstats/*.py` modules, `wordstats/__init__.py` and the three test files. So the model really did implement all three tasks before ticking; it did not tick without working. There is no sandbox transcript to show the order of the edits: the sandbox gets no Braintrust key, and on exit 75 only the status line is kept. That gap is worth closing if per-task behavior needs auditing later.
 
-**Next step:** the operator rules on fork F7 (spec.md, "Open fork F7"). After that, re-run V5 as run 4, from a new fixture branch cut from `fe87416`.
+**Next step (done):** the operator ruled F7-a on 2026-10-11 (spec.md, "Fork F7"). See "V5 re-run 4" below.
 
 **Side effect during the run (fixed for this session, not in code).** The Stop hook re-ran the orchestration suite because `.handoff/v5/*.py` are untracked `.py` files. Main's `webhook_bridge` e2e test (the leaky version; 010's fix `889785f` is not on main yet) then put `pipeline/owner/repo/demo-widget-1b73f10c/v1` on `agent-factory-pipeline`. The V5 worker ran its `ensure_target_pr_activity`, which failed harmlessly on the fake `owner/repo`, and the test terminated the workflow. To stop a repeat, `.handoff/` was added to `.git/info/exclude` (local only) for the rest of the run.
+
+### V5 re-run 4 (2026-10-10, 22:53–22:55 UTC; 2026-10-11 local): **pass**, mid-task resume shown
+
+Code: `b8e39df` (F7-a, one model session per open task). Target `aheumaier/pm-agent-scratch-test`, branch `v5-seat-handoff-4` (fixture `a6610a6`, cut from `fe87416`). Pool `credential-pool-v5c` (two logical seats on seat-a's token). Worker env: `SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS=1`, `SEAT_GUARD_FORCE_EXHAUST_HANDOFF=0`. The E2B template was rebuilt from `b8e39df`, and in a credential-less sandbox the sha256 of `/app/agent.py` (`04ef42b9…`) and `/app/seat_guard.py` (`2d87abb2…`) matched the repo. Seat smoke before the run: PASS, `utilization=0.52` (`seven_day`).
+
+The architect stage wrote a `tasks.md` with three open tasks (T001–T003), all with IDs, in `specs/v5-seat-handoff-4/`. So the Build took the per-task path.
+
+| Event | Seat | Detail |
+|---|---|---|
+| Architect stage (`architect/1/0`) | seat-a | Released with `utilization=0.53` (`seven_day`), `utilization_resets_at=2026-10-12T19:00:00+00:00`. |
+| Build handoff 0 (`build/1/0`, `handoff=0`) | seat-b | T001 session: pushed exactly **one** commit, `4bc7544 checkpoint: T001` (22:54:06; `conftest.py`, `wordstats/count.py`, `tests/test_count.py`, `tasks.md`). The force hook then raised `SeatExhausted`, so T002's session never started. |
+| `report_seat_failure` | seat-b | `exhausted_until` 23:54:13 UTC (now + 1 h), reading 1.0. |
+| Build handoff 1 (`build/1/1`, `handoff=1`) | seat-a | T001 was already `[X]`, so it got no session. First commit: `09e8114 checkpoint: T002` (22:54:39; `wordstats/unique.py`, `tests/test_unique.py`, `tasks.md`). Then `66ede3f checkpoint: end of T002` and `1654d94 checkpoint: T003`. Released with `utilization=0.54` (`five_hour`). |
+| Eval-Gate, Register | — | Passed. Exactly **one** feature PR: **#7**. |
+
+Pass criteria:
+1. Handoff 0 failed with `SeatExhausted` after exactly one commit, `checkpoint: T001`. **Met.**
+2. The remote branch holds that commit. **Met.**
+3. Handoff 1 ran on the other seat, and its first commit is T002. T001 was not redone. **Met.**
+4. Exactly one feature PR (#7). **Met.**
+5. Secrecy (SC-007): 0 hits for every `.env` secret value and for the `sk-ant-oat` prefix in each source: `v5-seat-handoff-run-4` history, `credential-pool-v5c` history, the worker log, and all scratch-repo PR comments. **Met.**
+
+This closes SC-001 of this spec and 009's SC-002 on the live path.
+
+**Observed, not fixed here.**
+- `66ede3f checkpoint: end of T002` holds only `__pycache__/*.pyc` files, left by the model's test run. Two things combine here: the scratch repo has no `.gitignore`, and both the harness and the model use `git add -A`. A target repo with a normal Python `.gitignore` would not see this. A harness-side ignore list would be a separate change.
+- The Eval-Gate still does not look at the diff (specs 006/008).
+- There is still no sandbox transcript on exit 75 (the sandbox has no Braintrust key).
+
+**Gate after cleanup:** `uv run pytest tests/ -q`: **140 passed**. `cd orchestration && uv run pytest -q`: **167 passed, 0 skipped**. `uv run ruff check .`: **All checks passed!** The `seat_guard.py` copies are byte-identical (`cmp`).
+
+**F7-a review (2026-10-11).** `py-codereviewer` ran two rounds. Round 1 had 6 minor findings and 1 nit, all fixed:
+1. the task-ID boundary (`T001a`);
+2. a deleted `tasks.md` crashed the run;
+3. single-session paths were tested only by accident;
+4. the branch-named `tasks.md` was untested;
+5. the usage reading across sessions was untested;
+6. the stderr note when a task is left open;
+7. the timeout sentence in R10.
+
+Round 2 had 2 minor findings (the docstring wording and a test for the `OSError` branch), both fixed. Verdict: **APPROVE**.
+
+Cleanup: the worker is stopped, `credential-pool-v5c` is terminated, `.git/info/exclude` is restored, and the fixture clone is deleted.
+
