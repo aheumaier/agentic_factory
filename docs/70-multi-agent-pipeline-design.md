@@ -34,6 +34,11 @@ the GitHub Web UI) or the `gh` CLI — never a direct Temporal SDK call.
 turns a GitHub comment into the internal `AgentPipelineWorkflow.run(...)`/
 `.signal(...)` call.
 
+> **Planned:** [`80-teams-workspace-design.md`](./80-teams-workspace-design.md)
+> adds Microsoft Teams as the primary interface (one bot per agent role,
+> card approvals, a channel tab over git artifacts). GitHub comments stay
+> as the secondary surface, and the first valid decision wins.
+
 Between these two entry points, a human decides when a shaped issue becomes
 `specs/NNN-slug/spec.md` — today, manually, via `/speckit-specify` →
 `/speckit-plan` → `/speckit-tasks`, per `CLAUDE.md`'s Spec Kit flow.
@@ -640,6 +645,10 @@ Concretely:
   the actual hand-off mechanism between agents: it's not incidental
   logging, it's the sole channel through which one stage's output becomes
   the next stage's (or the next attempt's) input.
+  *Superseded (planned) by [`80-teams-workspace-design.md`](./80-teams-workspace-design.md) §1.4:*
+  hand-off moves to workflow events + git artifacts. The PR thread and
+  the Teams thread both become projections of those events, and neither
+  is the sole channel.
 
 ## 7. Diagram (c) — artifact flow and storage at rest
 

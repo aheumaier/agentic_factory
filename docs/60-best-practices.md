@@ -14,7 +14,12 @@ Each item below is what should be true before that layer's status in
       `swe-agent`'s `verify_spec_exists()`. The original §3.1 design
       (bespoke `spec/` schema + `triage-policy.md`, Composio/Nango
       transport, Slack/Teams + HumanLayer/gotoHuman escalation) is
-      retired — do not rebuild it.
+      retired — do not rebuild it. **Exception, planned:** a Microsoft
+      Teams *team workspace* (bots per agent role, cards, a channel tab
+      over git artifacts) is now designed in
+      [`80-teams-workspace-design.md`](./80-teams-workspace-design.md).
+      That is not a revival of this design: HumanLayer/gotoHuman escalation
+      and Composio/Nango transport stay retired.
 - [ ] Only remaining action item: delete `tests/test_agent_spec_schema.py`,
       which still tests the deleted `spec/` schema and fails
       unconditionally.
