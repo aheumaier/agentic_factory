@@ -9,4 +9,20 @@ dependencies = []
 dev = [
     "pytest",
     "pyyaml",
+    "ruff>=0.17.0",
 ]
+
+# Repo-wide lint config. No other pyproject.toml here has a [tool.ruff]
+# table, so this one also governs harness/*/ and orchestration/. Enforced on
+# every .py edit by .claude/hooks/py-check.sh (see .claude/settings.json).
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [".specify", "specs", "**/.venv"]
+# Each of these runs with its own dir on sys.path (worker.py, agent.py as
+# scripts), so isort must treat their sibling modules as first-party.
+src = [".", "orchestration", "harness/*", "tests"]
+
+[tool.ruff.lint]
+# Pinned explicitly so results don't drift with ruff's own defaults.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "SIM"]

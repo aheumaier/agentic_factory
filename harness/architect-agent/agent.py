@@ -361,7 +361,7 @@ async def generate_candidates(checkout: Path, spec_dir: str, angles: list[str]) 
                 return await asyncio.wait_for(
                     generate_candidate(checkout, spec_dir, angle), CANDIDATE_TIMEOUT_S
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return {
                     "angle": angle, "valid": False, "error": "timeout",
                     "plan_md": "", "tasks_md": "", "adrs": [],

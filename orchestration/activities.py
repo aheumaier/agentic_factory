@@ -1,6 +1,7 @@
 """Temporal activities (§3.5) wrapping the SWE agent (Harness/Runtime, §3.2),
 the Eval-Gate (§3.6), and Register/Deploy (§3.7).
 """
+import asyncio
 import importlib.util
 import json
 import os
@@ -11,8 +12,6 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-
-import asyncio
 
 import yaml
 from e2b import AsyncSandbox

@@ -35,7 +35,7 @@ Nothing here is wired end-to-end. Each layer directory is a scaffold with
 
 | Layer                | Dir                       | Building block                       | State                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | -------------------- | ------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Spec/Intake          | `.specify/` + `specs/`    | GitHub Spec Kit                      | **Official flow — the old bespoke `spec/` schema/triage-policy design is retired, not supported.** `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` produce `specs/NNN-slug/`; enforced at runtime by `swe-agent`'s `verify_spec_exists()`. `tests/test_agent_spec_schema.py` still tests the deleted `spec/` schema and fails unconditionally — cleanup candidate, pending deletion                                                                                           |
+| Spec/Intake          | `.specify/` + `specs/`    | GitHub Spec Kit                      | **Official flow — the old bespoke `spec/` schema/triage-policy design is retired, not supported.** `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` produce `specs/NNN-slug/`; enforced at runtime by `swe-agent`'s `verify_spec_exists()`.                                                                                           |
 | Harness/Runtime      | `harness/template-agent/` | Claude Agent SDK (Python)            | `agent.py` is a stub `query()` call, no tool binding                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Harness/Runtime      | `harness/swe-agent/`      | Claude Agent SDK (Python) + Spec Kit | Real, implement-only agent: runs `/speckit-implement` on a pre-planned feature branch, commits, pushes, opens a PR. Registered in `registry/agents/swe-agent/`. See its `SKILL.md` for deferred scope                                                                                                                                                                                                                                                                                 |
 | Harness/Runtime      | `harness/pm-agent/`       | Claude Agent SDK (Python)            | Real, two independently callable capabilities in one `agent.py`: `shape_issue()` (zero bound tools, direct-to-Anthropic — target-repo GitHub-hosted runner can't reach the LiteLLM proxy) and `review_spec()` (`Read`/`Grep`/`Glob` only, `setting_sources=[]`, `GH_TOKEN`/`GITHUB_TOKEN` popped from the parent process for the model call, LiteLLM-routed). Registered in `registry/agents/pm-agent/`. See its `SKILL.md` for known gaps (no `pr_url` producer, no Temporal wiring). |
@@ -63,16 +63,23 @@ make gate                  # runs eval/braintrust/eval.config.py; its __main__ r
 make bridge                 # runs the webhook_bridge (specs/002-webhook-trigger-bridge): smee-client relay + aiohttp server as sibling processes; needs GH_WEBHOOK_SECRET, WEBHOOK_PROXY_URL, SWE_AGENT_APP_ID/PRIVATE_KEY in .env
 uv run pytest              # run the repo-root test suite (tests/), from root pyproject.toml + uv.lock
 cd orchestration && uv run pytest   # separate suite: orchestration/webhook_bridge/tests/, from orchestration/pyproject.toml + uv.lock — NOT covered by the root `uv run pytest`
+uv run ruff check .        # lint the whole repo (config: root pyproject.toml [tool.ruff], covers harness/* and orchestration/ too)
 ```
 
 The root `pyproject.toml`/`uv.lock` is dev/test tooling only (`pytest`,
-`pyyaml`) for the repo root — it is not a package meant to be installed.
+`pyyaml`, `ruff`) for the repo root — it is not a package meant to be installed.
 Each agent under `harness/<agent>/` has its own separate `pyproject.toml`
 for its own runtime deps (e.g. `harness/swe-agent/pyproject.toml` declares
 just `claude-agent-sdk`); don't conflate the two when adding a dependency —
 add runtime deps to the agent's own file, test/dev tooling to the root one.
 
-No linter is configured yet.
+Ruff (`uv run ruff check .`) is the linter; its rule set is pinned in the
+root `pyproject.toml`. **Ruff and both pytest suites are enforced by Claude
+Code hooks** (`.claude/settings.json` → `.claude/hooks/py-check.sh`): every
+`.py` edit runs ruff on that file plus both suites and feeds failures back,
+and a Stop hook re-runs them so a turn can't end red. Keep the baseline at
+zero. `ruff format` is not enforced. Before committing a Python change, run
+the `py-codereviewer` subagent (`.claude/agents/py-codereviewer.md`) on it.
 
 Service ports (docker-compose): Temporal 7233, Temporal UI 8080, Langfuse
 3000, LiteLLM proxy 4000.
@@ -87,10 +94,8 @@ Service ports (docker-compose): Temporal 7233, Temporal UI 8080, Langfuse
   §3.7, every agent's skill/tool definitions must live in `SKILL.md` /
   MCP-manifest format under `registry/agents/<name>/`, not in a
   vendor-specific format. `.github/workflows/registry-gate.yml` enforces (on
-  PRs touching `registry/**` or `spec/**`) that every dir under
-  `registry/agents/` has a `manifest.yaml` and a non-empty `versions/`. The
-  `spec/**` half of that path filter is stale — `spec/` no longer exists;
-  left as a follow-up, not fixed in this pass.
+  PRs touching `registry/**`) that every dir under `registry/agents/` has a
+  `manifest.yaml` and a non-empty `versions/`.
 - **Spec/Intake is Spec Kit, full stop.** The old bespoke `spec/`
   schema + `triage-policy.md` design is retired — don't resurrect it or
   point anyone at it. See "Feature work in this repo is planned with

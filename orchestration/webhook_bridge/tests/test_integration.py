@@ -5,6 +5,7 @@ fail only on first real use. This confirms the actual SDK surface round-trips
 against a live `make up` Temporal instance.
 """
 import asyncio
+import contextlib
 import uuid
 
 import pytest
@@ -82,7 +83,5 @@ async def test_real_temporal_start_resolve_and_signal_round_trip() -> None:
             result = await resolution.handle.result()
             assert result == "pm_approved"
         finally:
-            try:
+            with contextlib.suppress(Exception):  # best-effort cleanup only
                 await handle.terminate()
-            except Exception:  # noqa: BLE001 - best-effort cleanup only
-                pass

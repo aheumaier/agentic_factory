@@ -18,6 +18,7 @@ access: github_client is a MagicMock, agent.query and agent.subprocess.run
 are patched.
 """
 import asyncio
+import contextlib
 import json
 import sys
 import types
@@ -76,10 +77,8 @@ if "braintrust" not in sys.modules:
     sys.modules["braintrust"] = _bt_stub
 
 import agent  # noqa: E402 - path/stub setup above must run first
-
 from webhook_bridge import temporal_client  # noqa: E402
 from webhook_bridge.server import BridgeApp  # noqa: E402
-
 from webhook_bridge.tests._pipeline_workflow_stub import AgentPipelineWorkflow  # noqa: E402
 
 SECRET = "s3cr3t"
@@ -259,10 +258,8 @@ async def test_pm_approval_writeup_drives_real_bridge_signal():
             assert await handle.query(AgentPipelineWorkflow.stage) == "plan"
         finally:
             if handle is not None:
-                try:
+                with contextlib.suppress(Exception):  # best-effort cleanup only
                     await handle.terminate()
-                except Exception:  # noqa: BLE001 - best-effort cleanup only
-                    pass
 
 
 async def test_pm_rejection_feedback_drives_reject_signal_and_rereview():
@@ -375,7 +372,5 @@ async def test_pm_rejection_feedback_drives_reject_signal_and_rereview():
             assert await handle.query(AgentPipelineWorkflow.stage) == "plan"
         finally:
             if handle is not None:
-                try:
+                with contextlib.suppress(Exception):  # best-effort cleanup only
                     await handle.terminate()
-                except Exception:  # noqa: BLE001 - best-effort cleanup only
-                    pass

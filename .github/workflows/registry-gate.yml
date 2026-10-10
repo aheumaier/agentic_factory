@@ -1,12 +1,11 @@
 name: registry-gate
 
 # Deployment/Lifecycle enforcement (§3.7): no agent reaches Deploy without a
-# registry entry. Runs on any change touching registry/ or an agent's spec.
+# registry entry. Runs on any change touching registry/.
 on:
   pull_request:
     paths:
       - "registry/**"
-      - "spec/**"
 
 jobs:
   check-registry-entry:

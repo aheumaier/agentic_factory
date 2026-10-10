@@ -9,6 +9,7 @@ was actually met. Real per-criterion scoring is a follow-up.
 """
 import os
 import re
+from pathlib import Path
 
 import braintrust
 
@@ -27,7 +28,7 @@ _SC_BULLET_RE = re.compile(
 def load_success_criteria(spec_path: str) -> list[str]:
     """Parse `- **SC-NNN**: ...` bullets out of a Spec Kit `spec.md`'s
     `## Success Criteria` -> `### Measurable Outcomes` section."""
-    text = open(spec_path, encoding="utf-8").read()
+    text = Path(spec_path).read_text(encoding="utf-8")
     marker = "### Measurable Outcomes"
     idx = text.find(marker)
     if idx == -1:
@@ -53,7 +54,7 @@ def load_success_criteria_ids(spec_path: str) -> list[tuple[str, str]]:
     """Like `load_success_criteria`, but returns `(id, text)` pairs so a
     caller (harness/architect-agent/agent.py) can key structures on the
     same `SC-NNN` id set the Eval-Gate uses."""
-    text = open(spec_path, encoding="utf-8").read()
+    text = Path(spec_path).read_text(encoding="utf-8")
     marker = "### Measurable Outcomes"
     idx = text.find(marker)
     if idx == -1:

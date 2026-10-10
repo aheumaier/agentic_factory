@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh edit",
+            "timeout": 300,
+            "statusMessage": "ruff + pytest"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh stop",
+            "timeout": 300,
+            "statusMessage": "ruff + pytest (end of turn)"
+          }
+        ]
+      }
+    ]
+  }
+}

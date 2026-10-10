@@ -14,7 +14,6 @@ import pytest
 
 from conftest import architect_agent as arch
 
-
 # --- Helpers ---------------------------------------------------------------
 
 def _envelope_text(**fields) -> str:
@@ -60,10 +59,9 @@ def test_no_git_credentials_restores_on_exception(monkeypatch):
     monkeypatch.setenv("GH_TOKEN", "tok-a")
     monkeypatch.setenv("GITHUB_TOKEN", "tok-b")
 
-    with pytest.raises(RuntimeError):
-        with arch._no_git_credentials():
-            assert "GH_TOKEN" not in os.environ
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), arch._no_git_credentials():
+        assert "GH_TOKEN" not in os.environ
+        raise RuntimeError("boom")
 
     assert os.environ["GH_TOKEN"] == "tok-a"
     assert os.environ["GITHUB_TOKEN"] == "tok-b"
@@ -303,7 +301,6 @@ def test_generate_candidate_validity_and_mode_legality(tmp_path, monkeypatch):
 # --- T028a: bounds -----------------------------------------------------------
 
 def test_generate_candidates_bounds(tmp_path, monkeypatch):
-    concurrent = []
     peak = [0]
     lock_count = [0]
 
