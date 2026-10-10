@@ -68,6 +68,7 @@ pick = min(eligible seats in assignments[agent],
 | invalid | `ApplicationError(type="SeatInvalid", non_retryable=True)` | `details=[seat_id]` |
 | pool empty | `ApplicationError(type="CredentialPoolExhausted", non_retryable=True)` raised by the workflow | `details=[earliest_exhausted_until_iso or None]` |
 | handoff budget spent | `ApplicationError(type="SeatHandoffsExhausted", non_retryable=True)` raised by the workflow | `details=[stage, MAX_SEAT_HANDOFFS]` |
+| pool itself unreachable (seat activity failed after retries) | `ApplicationError(type="CredentialPoolUnavailable", non_retryable=True)` raised by the workflow | message carries the activity failure |
 
 ## UsageSnapshot (in-agent, from `RateLimitEvent`)
 

@@ -65,3 +65,14 @@ Expect: result `OK`, and `usage.utilization` is a float, not `None` (SC-007, res
    - exactly one open PR on the branch (SC-002, SC-003);
    - the `seats()` query shows the first seat as `exhausted_until ≈ now+1h` (no real reset time), and the second as released with a utilization figure.
 4. Secrecy check (SC-006): `temporal workflow show -w <id> --output json | grep -c sk-ant-oat` should print `0`. Run the same grep over the worker log and the PR comments.
+
+## Results
+
+Run on 2026-10-10 on branch `009-credential-pool-handoff`, with local Temporal up (`docker compose up -d temporal`).
+
+| Step | Result |
+|---|---|
+| V1 unit tests | `uv run pytest tests/ -q`: **108 passed**. `ruff check .` is clean. |
+| V2 + V3 (Temporal) | `cd orchestration && uv run pytest -q`: **134 passed, 0 skipped**. This covers the pool workflow; Build and architect handoff; pool exhausted; handoff budget; pool unavailable; a failed release; and a cancel during a seat-backed stage. |
+| V4 live seat smoke | `scripts/seat_smoke.py` against seat-a, with a poisoned parent `ANTHROPIC_API_KEY`/`BASE_URL`: **PASS**. `result='OK'`, `utilization=0.65` (`five_hour`). |
+| V5 live end-to-end | **Pending.** Needs `E2B_API_KEY`, `GH_TOKEN`, a disposable target repo, and the T042 E2B template rebuild with `seat_guard.py`. |

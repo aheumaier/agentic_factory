@@ -296,6 +296,7 @@ async def ensure_target_pr_activity(repo: str, branch: str) -> str:
 @activity.defn
 async def architect_stage_activity(
     repo: str, branch: str, pr_url: str, attempt: int, feedback: str | None = None,
+    seat_id: str | None = None,
 ) -> dict:
     """Architect fan-out/judge stage (004), run in-process — no E2B sandbox
     for this stage, per its own design carve-out (§6.1). Maps the two
@@ -308,8 +309,23 @@ async def architect_stage_activity(
       - PlanDeterministicFailure: any other ValueError/RuntimeError from
         the stage (CO-2) — the caller charges its plan-attempt budget.
     Anything else (e.g. a transient git/gh CalledProcessError) propagates
-    raw for the workflow's _TRANSIENT_RETRY policy to retry."""
+    raw for the workflow's _TRANSIENT_RETRY policy to retry.
+
+    With `seat_id` (specs/009, via _with_seat) every model call runs on that
+    credential-pool seat; a seat outcome is raised as the same typed
+    SeatExhausted/SeatInvalid ApplicationError as run_swe_agent_activity's,
+    and the result gains seat_id/utilization/rate_limit_type. Without it
+    (pre-seat-pool-v1 histories) the stage stays LiteLLM-routed."""
     _validate_target(repo, branch)
+    try:
+        seat_token = token_for(seat_id, load_pool()) if seat_id else None
+    except KeyError as e:
+        # Pool misconfiguration (unknown seat / token env var unset): not
+        # transient, and not a plan failure — never charged (FR-019). The
+        # message names the env var only.
+        raise ApplicationError(
+            str(e), type="CredentialPoolUnavailable", non_retryable=True,
+        ) from None
 
     async def _heartbeat() -> None:
         while True:
@@ -318,9 +334,20 @@ async def architect_stage_activity(
 
     heartbeat_task = asyncio.ensure_future(_heartbeat())
     try:
-        return await _architect_agent.run_architect_stage(
-            repo, branch, pr_url, attempt, feedback=feedback,
+        result = await _architect_agent.run_architect_stage(
+            repo, branch, pr_url, attempt, feedback=feedback, seat_token=seat_token,
         )
+    # Seat outcomes first: neither is a RuntimeError/ValueError, but keeping
+    # them ahead of that mapping means no plan-budget type can ever claim one.
+    except _architect_agent.SeatExhausted as e:
+        raise ApplicationError(
+            "seat exhausted", seat_id, _epoch_to_iso(e.resets_at),
+            type="SeatExhausted", non_retryable=True,
+        ) from None
+    except _architect_agent.SeatInvalid:
+        raise ApplicationError(
+            "seat invalid", seat_id, type="SeatInvalid", non_retryable=True,
+        ) from None
     except RuntimeError as e:
         if "malformed" in str(e).lower():
             raise ApplicationError(
@@ -335,6 +362,15 @@ async def architect_stage_activity(
         ) from e
     finally:
         heartbeat_task.cancel()
+    usage = result.pop("_seat_usage", None) or {}
+    if seat_id is not None:
+        # An idempotent_hit result made no model call: no usage, still released.
+        result.update({
+            "seat_id": seat_id,
+            "utilization": usage.get("utilization"),
+            "rate_limit_type": usage.get("rate_limit_type"),
+        })
+    return result
 
 
 def _factory_repo() -> str:

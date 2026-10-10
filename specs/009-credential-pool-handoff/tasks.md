@@ -138,16 +138,18 @@ description: "Task list for 009-credential-pool-handoff"
 
 **Independent Test**: two logical seats, forced exhaustion after task 1 → task 1 pushed, successor on the other seat starts at task 2, one PR, budgets untouched (SC-002, SC-003, SC-004).
 
-- [ ] T021 [US2] Rewrite `IMPLEMENT_PROMPT` in `harness/swe-agent/agent.py`:
+- [X] T021 [US2] Rewrite `IMPLEMENT_PROMPT` in `harness/swe-agent/agent.py`:
   - tasks already marked `[X]` in tasks.md were done by a previous run, so skip them;
   - after finishing each task, mark it `[X]` in tasks.md and `git add -A && git commit`, with no push.
 
   Keep the existing "stop, don't push, don't open a PR" instruction and the local-verification instruction.
-- [ ] T022 [US2] In `harness/swe-agent/agent.py`:
+- [X] T022 [US2] In `harness/swe-agent/agent.py`:
   - add `has_open_tasks(checkout)`, which is true if any `specs/*/tasks.md` contains a `- [ ]` line;
   - in `run()`, when it is false, skip `run_implement` and `verify_new_commit` and go straight to `push_and_open_pr`;
   - wire the force hook: pass `force_check=lambda: commits_since(checkout, sha_before) >= N` to `guarded_query` when `SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS` is set.
-- [ ] T023 [US2] In `harness/swe-agent/agent.py` `__main__`, catch `SeatExhausted`/`SeatInvalid` from `run()`:
+
+  *Implemented with deviations:* the check reads only `specs/<branch>/tasks.md` when that file exists, because older specs may keep open boxes forever, and it needs at least one `[X]` line. The shortcut applies only when `feedback is None`. On a Gate-feedback retry every task is already `[X]` from the previous attempt, so the shortcut would re-push unchanged code forever. Known gap: feedback plus a handoff, where the predecessor already committed the fix, can still trip `verify_new_commit` on the successor.
+- [X] T023 [US2] In `harness/swe-agent/agent.py` `__main__`, catch `SeatExhausted`/`SeatInvalid` from `run()`:
   1. `git push -u origin <branch>` in the checkout (skip if there are no commits beyond the cloned HEAD). If the push fails, exit 1, never 75/77.
   2. Print the `{"seat_status":"exhausted"|"invalid",…}` JSON line last.
   3. `sys.exit(75)` or `sys.exit(77)`.
@@ -162,7 +164,7 @@ description: "Task list for 009-credential-pool-handoff"
   - add `MAX_SEAT_HANDOFFS = 4`;
   - on an `ActivityError` whose `cause.type` is in `{"SeatExhausted","SeatInvalid"}`, call `report_seat_failure_activity(seat_id, key, kind, resets_at)` and loop with `handoff+1`;
   - after the loop, raise `ApplicationError(type="SeatHandoffsExhausted", non_retryable=True, details=[stage, MAX_SEAT_HANDOFFS])`.
-- [ ] T026 [P] [US2] Write `tests/test_swe_agent_seat.py` with the SDK and git mocked:
+- [X] T026 [P] [US2] Write `tests/test_swe_agent_seat.py` with the SDK and git mocked:
   - `has_open_tasks` true/false and multiple spec dirs;
   - the all-done shortcut skips `run_implement`;
   - a `SeatExhausted` raised from `run_implement` leads to push, the JSON line and exit 75;
@@ -226,27 +228,29 @@ description: "Task list for 009-credential-pool-handoff"
 
 **Independent Test**: the stub's first seat is exhausted → the stage re-runs on another seat, `MAX_PLAN_ATTEMPTS` is untouched, one comment per attempt.
 
-- [ ] T033 [US5] In `harness/architect-agent/agent.py`:
+- [X] T033 [US5] In `harness/architect-agent/agent.py`:
   - load the sibling `seat_guard.py` by file path (importlib, `_load_module_by_path` style), because the worker loads `agent.py` by path;
   - add a `seat_token: str | None = None` parameter to `_candidate_options` and to the score, synth and critic option builders (around lines 269, 484, 562 and 603). Seat mode uses `seat_guard.seat_options_env(token)`; `None` keeps the LiteLLM env unchanged;
   - switch `_model_text` to `seat_guard.guarded_query`, accumulating into a stage-level `usage` dict;
   - thread `seat_token` through `run_architect_stage(…, seat_token=None)` and expose the final usage snapshot to the caller, for example on the returned dict under a `_seat_usage` key that the activity strips.
-- [ ] T034 [US5] Change `generate_candidates` in `harness/architect-agent/agent.py` from `asyncio.gather` to `asyncio.TaskGroup`, so that a `SeatExhausted`/`SeatInvalid` in one candidate cancels its siblings (FR-013). Unwrap the resulting `ExceptionGroup` to re-raise the single seat exception. Make sure `generate_candidate`'s `except (ValueError, RuntimeError)` and the timeout handling still swallow only what they did before.
-- [ ] T035 [US5] Change `architect_stage_activity` in `orchestration/activities.py`:
+- [X] T034 [US5] Change `generate_candidates` in `harness/architect-agent/agent.py` from `asyncio.gather` to `asyncio.TaskGroup`, so that a `SeatExhausted`/`SeatInvalid` in one candidate cancels its siblings (FR-013). Unwrap the resulting `ExceptionGroup` to re-raise the single seat exception. Make sure `generate_candidate`'s `except (ValueError, RuntimeError)` and the timeout handling still swallow only what they did before.
+- [X] T035 [US5] Change `architect_stage_activity` in `orchestration/activities.py`:
   - new signature `(repo, branch, pr_url, attempt, feedback, seat_id)`;
   - resolve the token with `token_for`;
   - map `SeatExhausted`/`SeatInvalid` to typed `ApplicationError`s **before** the existing `RuntimeError`/`ValueError` mapping;
   - add `seat_id`/`utilization`/`rate_limit_type` from `_seat_usage` to the result, leaving `idempotent_hit` handling intact (CO-4 still branches on `.get("idempotent_hit")` first).
-- [ ] T036 [US5] Wire the architect call in the plan loop of `orchestration/workflows/pipeline_workflow.py` through `self._with_seat("architect-agent", "architect", plan_attempt, architect_stage_activity, [repo, branch, pr_url, plan_attempt, plan_feedback], start_to_close_timeout=timedelta(minutes=30), retry_policy=_TRANSIENT_RETRY)` under the same `seat-pool-v1` patch. In the existing `except`, re-raise `CredentialPoolExhausted`/`SeatHandoffsExhausted` causes **before** the CO-2 budget-charging branch, the same way as `MalformedRetriesExhausted`.
-- [ ] T037 [P] [US5] Extend `tests/test_architect_agent.py`:
+- [X] T036 [US5] Wire the architect call in the plan loop of `orchestration/workflows/pipeline_workflow.py` through `self._with_seat("architect-agent", "architect", plan_attempt, architect_stage_activity, [repo, branch, pr_url, plan_attempt, plan_feedback], start_to_close_timeout=timedelta(minutes=30), retry_policy=_TRANSIENT_RETRY)` under the same `seat-pool-v1` patch. In the existing `except`, re-raise `CredentialPoolExhausted`/`SeatHandoffsExhausted` causes **before** the CO-2 budget-charging branch, the same way as `MalformedRetriesExhausted`.
+- [X] T037 [P] [US5] Extend `tests/test_architect_agent.py`:
   - seat-mode option builders carry `CLAUDE_CODE_OAUTH_TOKEN` and blank `ANTHROPIC_*`;
   - non-seat mode is unchanged (LiteLLM env);
   - a fake `query` that raises `SeatExhausted` for one angle cancels the other candidates and propagates `SeatExhausted`, not a candidate `error` dict.
-- [ ] T038 [US5] Add architect handoff cases to `orchestration/tests/test_pipeline_workflow.py`:
+- [X] T038 [US5] Add architect handoff cases to `orchestration/tests/test_pipeline_workflow.py`:
   - the architect stub raises `SeatExhausted` on its first call → the stage re-runs on the other seat and the plan-attempt budget is not charged;
   - a one-seat `CredentialPoolExhausted` during the architect stage → the run fails without charging `MAX_PLAN_ATTEMPTS`.
 
   Update the existing architect stub signature to the new `seat_id` argument.
+
+  *Implemented note:* on seats, the lease release runs after the architect result, so the test helper `_wait_plan_parked` also waits for no pending activities. The production side of this is the pre-existing plan-signal race (a `plan_approved` arriving before the post-stage reset is dropped), now with a slightly wider window: the release activity. It stays a 005 follow-up.
 
 **Checkpoint**: both seat-backed stages run on the pool.
 
@@ -254,19 +258,23 @@ description: "Task list for 009-credential-pool-handoff"
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T039 [P] Update `CLAUDE.md`:
+- [X] T039 [P] Update `CLAUDE.md`:
   - **Inference Routing row:** the seat path goes direct to Anthropic, a documented §3.4 deviation, with a pointer to research R4.
   - **Orchestration row:** `CredentialPoolWorkflow`, `_with_seat`, the `seat-pool-v1` patch, and the handoff and pool-exhausted failure types.
   - **swe-agent and architect-agent Harness rows:** seat-backed, checkpointed handoff.
   - **Commands:** a note on `orchestration/scripts/seat_smoke.py`.
 
   Stage only these hunks: CLAUDE.md has unrelated uncommitted operator edits.
-- [ ] T040 [P] Update `agent-factory-architecture.md` §3.4: the seat-path deviation, why LiteLLM can't pool OAuth tokens (R4), the LiteLLM pass-through follow-up, and the single-operator usage constraint.
-- [ ] T041 [P] Update `harness/swe-agent/SKILL.md` and `harness/architect-agent/SKILL.md`: the seat-backed runtime, the exit codes 75/77 and the resume behavior, the usage constraint, and "Known gaps" (the GitHub-comment path still uses the API key; no durable sleep-until-reset; no expiry alert).
+- [X] T040 [P] Update `agent-factory-architecture.md` §3.4: the seat-path deviation, why LiteLLM can't pool OAuth tokens (R4), the LiteLLM pass-through follow-up, and the single-operator usage constraint.
+- [X] T041 [P] Update `harness/swe-agent/SKILL.md` and `harness/architect-agent/SKILL.md`: the seat-backed runtime, the exit codes 75/77 and the resume behavior, the usage constraint, and "Known gaps" (the GitHub-comment path still uses the API key; no durable sleep-until-reset; no expiry alert).
 - [ ] T042 Rebuild the E2B template (`cd sandbox/swe-agent && e2b template build`). This is a **manual** step that needs the operator's E2B credentials, so record the outcome in this task when it is run.
-- [ ] T043 Run quickstart V1–V3 locally (`make up`, then both suites with no skips) and V4 against seat-a. Record the results in `specs/009-credential-pool-handoff/quickstart.md` under a "Results" heading.
+
+  *Pending (2026-10-10):* `E2B_API_KEY` is empty in `.env` and the `e2b` CLI isn't installed on this host. Until the template is rebuilt, the sandbox runs the old image without `seat_guard.py`, so the seat path can't run live.
+- [X] T043 Run quickstart V1–V3 locally (`make up`, then both suites with no skips) and V4 against seat-a. Record the results in `specs/009-credential-pool-handoff/quickstart.md` under a "Results" heading.
 - [ ] T044 Run quickstart V5 (live end-to-end with forced handoff and the secrecy grep) once `E2B_API_KEY`, `GH_TOKEN` and a disposable target repo are available. Until then, record it as pending with the missing prerequisites listed.
-- [ ] T045 Run `py-codereviewer` over the full 009 diff and resolve the findings before the PR.
+
+  *Pending (2026-10-10):* missing `E2B_API_KEY`, `GH_TOKEN`, a disposable target repo, and the T042 template rebuild.
+- [X] T045 Run `py-codereviewer` over the full 009 diff and resolve the findings before the PR.
 
 ---
 

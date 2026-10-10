@@ -20,9 +20,12 @@ import yaml
 
 DEFAULT_POOL_PATH = Path(__file__).resolve().parent / "pool.yaml"
 
-# Longer than the longest stage start_to_close_timeout (Build: 60 min,
-# Architect: 30 min), so only a genuinely leaked lease — e.g. a pipeline
-# workflow terminated mid-stage — ever ages out (research R6).
+# Longer than a single attempt of the longest stage (Build: 60 min, one
+# attempt; Architect: 30 min), so normally only a genuinely leaked lease —
+# e.g. a pipeline workflow terminated mid-stage — ever ages out (research
+# R6). Architect retries under _TRANSIENT_RETRY (4 x 30 min + backoff), so a
+# worst-case all-timeouts run can outlive its lease by ~35 s, briefly
+# letting the seat be oversubscribed by one; accepted.
 LEASE_TTL = timedelta(hours=2)
 
 # Used when a seat is exhausted but no reset time was reported (research R7).

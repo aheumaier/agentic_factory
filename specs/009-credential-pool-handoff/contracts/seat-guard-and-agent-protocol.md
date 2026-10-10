@@ -52,7 +52,9 @@ On 75 and 77, the agent has already run `git push -u origin <branch>` for every 
 
 **Resume behavior:**
 - `IMPLEMENT_PROMPT` tells the agent to skip `[X]` tasks and to mark and commit after each task, without pushing.
-- If the checkout's `specs/*/tasks.md` has no `- [ ]` left, the agent skips `run_implement` and `verify_new_commit` and goes straight to `push_and_open_pr`. That function already reuses an existing PR on "already exists".
+- If the feature's tasks.md (`specs/<branch>/tasks.md` when it exists, else every `specs/*/tasks.md`) has at least one `- [X]` line and no `- [ ]` line left, the agent skips `run_implement` and `verify_new_commit` and goes straight to `push_and_open_pr`. That function already reuses an existing PR on "already exists". The shortcut applies only when no Gate feedback was passed: a feedback retry always runs `run_implement`, because its tasks are already `[X]` from the previous attempt.
+- The checkpoint push counts and pushes the `<branch>` ref (`git rev-list --count <sha_before>..<branch>`), not HEAD, and is skipped when that count is 0. A push error is scrubbed of `GH_TOKEN`. It refuses to push `main`/`master`, the same invariant `verify_left_main` guards on the normal path.
+- Known gap: on a feedback retry that hands off after the predecessor already committed the fix, the successor may make no new commit and fail `verify_new_commit` (exit 1).
 
 ## `run_swe_agent_activity(repo, branch, feedback, seat_id) -> dict`
 

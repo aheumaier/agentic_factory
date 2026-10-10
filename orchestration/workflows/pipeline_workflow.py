@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ActivityError, ApplicationError, is_cancelled_exception
 
 # activities.py loads eval/braintrust/eval.config.py via importlib at module
 # import time (Path.resolve(), exec_module) — real filesystem/non-
@@ -71,6 +71,9 @@ _SEAT_ACTIVITY_OPTS = {
     "retry_policy": _TRANSIENT_RETRY,
 }
 _SEAT_OUTCOMES = {"SeatExhausted": "exhausted", "SeatInvalid": "invalid"}
+# Raised by _with_seat itself (workflow code, not an activity): the pool, not
+# the stage, failed — never charged to a stage's own retry budget.
+_POOL_FAILURES = {"CredentialPoolExhausted", "SeatHandoffsExhausted", "CredentialPoolUnavailable"}
 
 
 @workflow.defn
@@ -100,9 +103,7 @@ class AgentPipelineWorkflow:
         workflow_id = workflow.info().workflow_id
         for handoff in range(MAX_SEAT_HANDOFFS + 1):
             lease_key = f"{workflow_id}/{stage}/{invocation}/{handoff}"
-            lease = await workflow.execute_activity(
-                acquire_seat_activity, args=[agent, lease_key], **_SEAT_ACTIVITY_OPTS
-            )
+            lease = await self._pool_call(acquire_seat_activity, [agent, lease_key])
             seat_id = lease["seat_id"]
             if seat_id is None:
                 raise ApplicationError(
@@ -122,10 +123,8 @@ class AgentPipelineWorkflow:
                     raise
                 details = list(getattr(e.cause, "details", None) or [])
                 resets_at = details[1] if kind == "exhausted" and len(details) > 1 else None
-                await workflow.execute_activity(
-                    report_seat_failure_activity,
-                    args=[seat_id, lease_key, kind, resets_at],
-                    **_SEAT_ACTIVITY_OPTS,
+                await self._pool_call(
+                    report_seat_failure_activity, [seat_id, lease_key, kind, resets_at],
                 )
                 continue
             # Not BaseException: a workflow cancel (CancelledError) must
@@ -145,15 +144,37 @@ class AgentPipelineWorkflow:
             non_retryable=True,
         )
 
+    async def _pool_call(self, activity_fn, args: list):
+        """A seat activity, its failure (after _TRANSIENT_RETRY) typed as the
+        pool's own: a stage's retry budget must never be charged for it
+        (FR-019) — callers re-raise anything in _POOL_FAILURES."""
+        try:
+            return await workflow.execute_activity(activity_fn, args=args, **_SEAT_ACTIVITY_OPTS)
+        except ActivityError as e:
+            # A workflow cancel arrives as ActivityError(cause=CancelledError);
+            # re-typing it would turn Cancelled into Failed, or let
+            # _release_seat swallow it.
+            if is_cancelled_exception(e):
+                raise
+            raise ApplicationError(
+                f"Credential pool unavailable: {e.cause or e}",
+                type="CredentialPoolUnavailable",
+                non_retryable=True,
+            ) from e
+
     async def _release_seat(
         self, seat_id: str, lease_key: str,
         utilization: float | None, rate_limit_type: str | None,
     ) -> None:
-        await workflow.execute_activity(
-            release_seat_activity,
-            args=[seat_id, lease_key, utilization, rate_limit_type],
-            **_SEAT_ACTIVITY_OPTS,
-        )
+        """Best effort: a failed release must neither mask the stage's own
+        outcome (its result, or its error) nor discard a finished stage. The
+        lease then ages out via LEASE_TTL; only the usage figure is lost."""
+        try:
+            await self._pool_call(
+                release_seat_activity, [seat_id, lease_key, utilization, rate_limit_type],
+            )
+        except ApplicationError as e:
+            workflow.logger.warning("Seat %s release failed: %s", seat_id, e)
 
     @workflow.run
     async def run(self, repo: str, branch: str, agent_name: str, version: str) -> str:
@@ -174,17 +195,42 @@ class AgentPipelineWorkflow:
             plan_feedback: str | None = None
             plan_attempt = 0
             charged = 0
+            # Its own patch id, not the Build loop's "seat-pool-v1": patched()
+            # is memoized per id, so sharing one would make this earlier call
+            # decide the Build loop's branch on replay of older histories.
+            on_seats = workflow.patched("architect-seat-pool-v1")
             while True:
                 plan_attempt += 1
                 try:
-                    result = await workflow.execute_activity(
-                        architect_stage_activity,
-                        args=[repo, branch, pr_url, plan_attempt, plan_feedback],
-                        start_to_close_timeout=timedelta(minutes=30),
-                        retry_policy=_TRANSIENT_RETRY,
-                    )
+                    if on_seats:
+                        # specs/009: on a credential-pool seat; seat handoffs
+                        # happen inside _with_seat and never charge the budget.
+                        result = await self._with_seat(
+                            "architect-agent", "architect", plan_attempt,
+                            architect_stage_activity,
+                            [repo, branch, pr_url, plan_attempt, plan_feedback],
+                            start_to_close_timeout=timedelta(minutes=30),
+                            retry_policy=_TRANSIENT_RETRY,
+                        )
+                    else:
+                        result = await workflow.execute_activity(
+                            architect_stage_activity,
+                            args=[repo, branch, pr_url, plan_attempt, plan_feedback],
+                            start_to_close_timeout=timedelta(minutes=30),
+                            retry_policy=_TRANSIENT_RETRY,
+                        )
                 except Exception as e:  # noqa: BLE001 — ActivityError wraps the ApplicationError cause
+                    # specs/009: no seat to run on (or the handoff budget is
+                    # spent) says nothing about the plan — fail the run
+                    # without charging, like CO-3 below.
+                    if isinstance(e, ApplicationError) and e.type in _POOL_FAILURES:
+                        raise
                     cause = getattr(e, "cause", None)
+                    # A cancel is the operator's, not a plan failure; and a
+                    # pool failure raised activity-side (e.g. a seat's token
+                    # env var unset) is the pool's — neither is charged.
+                    if is_cancelled_exception(e) or getattr(cause, "type", None) in _POOL_FAILURES:
+                        raise
                     if getattr(cause, "type", None) == "MalformedRetriesExhausted":
                         # CO-3: not a budget-charging failure — fail the run.
                         raise ApplicationError(

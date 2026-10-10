@@ -3,11 +3,13 @@
 already produced upstream (Spec/Intake, §3.1, done manually), then opens
 a PR. See SKILL.md for what's deliberately deferred this pass.
 """
+import contextlib
 import glob
 import json
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import braintrust
@@ -15,7 +17,13 @@ from claude_agent_sdk import ClaudeAgentOptions, query
 
 # Sibling module, not a package: agent.py runs as a script (/app in the E2B
 # sandbox), so its own directory is on sys.path. specs/009.
-from seat_guard import guarded_query, seat_options_env
+from seat_guard import (
+    SeatExhausted,
+    SeatInvalid,
+    force_exhaust_after_commits,
+    guarded_query,
+    seat_options_env,
+)
 
 # Observability (§3.8): same project as eval/braintrust/eval.config.py, so a
 # run's trace and its Eval-Gate score land side by side.
@@ -25,6 +33,13 @@ logger = braintrust.init_logger(project=BRAINTRUST_PROJECT)
 braintrust.auto_instrument()
 
 IMPLEMENT_PROMPT = """/speckit-implement
+
+This branch may already hold work from an earlier run that was cut off \
+(specs/009: a run can hand off mid-task to another seat). Tasks already \
+marked `[X]` in tasks.md are done — skip them and continue with the first \
+task still marked `[ ]`. After finishing each task, mark it `[X]` in \
+tasks.md and commit right away with `git add -A && git commit`, so \
+finished work survives an interruption.
 
 After implementing, run this repo's existing tests/verification locally \
 to confirm the change works. Then commit your changes locally with \
@@ -128,6 +143,39 @@ def verify_spec_exists(checkout: Path) -> None:
         )
 
 
+# Real checklist lines, anchored at line start: prose that merely mentions
+# "- [ ]" mid-sentence (as specs/009's own tasks.md does) must not count.
+_OPEN_TASK_RE = re.compile(r"^\s*- \[ \]", re.MULTILINE)
+_DONE_TASK_RE = re.compile(r"^\s*- \[[xX]\]", re.MULTILINE)
+
+
+def _task_files(checkout: Path, branch: str | None) -> list[Path]:
+    """The feature's own tasks.md (Spec Kit: spec dir == branch name) when it
+    exists — older specs on the branch may keep open boxes forever — else
+    every specs/*/tasks.md."""
+    if branch:
+        own = checkout / "specs" / branch / "tasks.md"
+        if own.is_file():
+            return [own]
+    return [Path(p) for p in glob.glob(str(checkout / "specs" / "*" / "tasks.md"))]
+
+
+def has_open_tasks(checkout: Path, branch: str | None = None) -> bool:
+    """True if the feature's tasks.md still has an unchecked task (specs/009
+    resume: a predecessor seat may already have finished every task)."""
+    return any(_OPEN_TASK_RE.search(f.read_text()) for f in _task_files(checkout, branch))
+
+
+def all_tasks_done(checkout: Path, branch: str | None = None) -> bool:
+    """At least one checked task and none open. A tasks.md with no checklist
+    at all is not "done" — it was never in Spec Kit form, so implement."""
+    files = _task_files(checkout, branch)
+    return (
+        any(_DONE_TASK_RE.search(f.read_text()) for f in files)
+        and not has_open_tasks(checkout, branch)
+    )
+
+
 def _seat_token() -> str | None:
     """The subscription-seat OAuth token, when this run is seat-backed
     (Temporal path, specs/009). Unset on the GitHub-comment path
@@ -161,23 +209,31 @@ def build_options(cwd: Path, seat_token: str | None = None) -> ClaudeAgentOption
 
 async def run_implement(
     checkout: Path, feedback: str | None = None, usage: dict | None = None,
+    force_check: Callable[[], bool] | None = None,
 ) -> str:
     """Run /speckit-implement. In seat mode the stream goes through
     seat_guard, which records last-seen usage into `usage` and raises
-    SeatExhausted/SeatInvalid on a seat outcome (specs/009)."""
+    SeatExhausted/SeatInvalid on a seat outcome (specs/009). `force_check`
+    is seat_guard's test hook (SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS)."""
     prompt = IMPLEMENT_PROMPT
     if feedback:
         prompt += FEEDBACK_PROMPT_SUFFIX.format(feedback=feedback)
     seat_token = _seat_token()
     options = build_options(checkout, seat_token)
     stream = (
-        guarded_query(prompt, options, usage if usage is not None else {}, query_fn=query)
+        guarded_query(
+            prompt, options, usage if usage is not None else {},
+            query_fn=query, force_check=force_check,
+        )
         if seat_token
         else query(prompt=prompt, options=options)
     )
     transcript: list[str] = []
-    async for message in stream:
-        transcript.append(str(message))
+    # aclosing: an exception mid-stream tears the CLI subprocess down now,
+    # not whenever the generator happens to be garbage-collected.
+    async with contextlib.aclosing(stream) as messages:
+        async for message in messages:
+            transcript.append(str(message))
     return "\n".join(transcript)
 
 
@@ -192,6 +248,31 @@ def verify_left_main(checkout: Path, branch: str) -> None:
 
 def _head_sha(checkout: Path) -> str:
     return _run(["git", "rev-parse", "HEAD"], cwd=checkout)
+
+
+def commits_since(checkout: Path, sha: str, ref: str = "HEAD") -> int:
+    return int(_run(["git", "rev-list", "--count", f"{sha}..{ref}"], cwd=checkout))
+
+
+def checkpoint_push(checkout: Path, branch: str, sha_before: str) -> None:
+    """Push every commit made on `branch` before a seat outcome ends the run
+    (specs/009 FR-008), so the successor seat resumes from it. Counts and
+    pushes the branch ref, not HEAD — wherever the agent left HEAD. A push
+    failure propagates (exit 1, never 75/77): a seat outcome must not hide
+    lost work."""
+    # Same invariant verify_left_main guards on the normal path: never push
+    # the model's commits to the default branch.
+    if branch in ("main", "master"):
+        raise RuntimeError(f"Refusing to checkpoint-push to '{branch}'.")
+    if commits_since(checkout, sha_before, ref=branch) == 0:
+        return
+    token = os.environ.get("GH_TOKEN")
+    try:
+        _run(["git", "push", "-u", "origin", branch], cwd=checkout)
+    except subprocess.CalledProcessError as e:
+        if not token:
+            raise
+        raise _scrubbed(e, token) from None
 
 
 def verify_new_commit(checkout: Path, sha_before: str) -> None:
@@ -253,34 +334,74 @@ async def run(
     checkout = clone_and_checkout(repo, branch, work_root)
     verify_spec_exists(checkout)
     sha_before = _head_sha(checkout)
-    await run_implement(checkout, feedback, usage)
-    verify_left_main(checkout, branch)
-    verify_new_commit(checkout, sha_before)
+    # All-done shortcut (specs/009 resume): a predecessor seat finished every
+    # task but ran out before the PR step. Not on a Gate-feedback retry —
+    # there every task is already [X] from the previous attempt, and the
+    # feedback still has to be acted on.
+    if feedback is None and all_tasks_done(checkout, branch):
+        verify_left_main(checkout, branch)
+    else:
+        n = force_exhaust_after_commits()
+        force_check = (lambda: commits_since(checkout, sha_before) >= n) if n is not None else None
+        try:
+            await run_implement(checkout, feedback, usage, force_check)
+        except (SeatExhausted, SeatInvalid):
+            checkpoint_push(checkout, branch, sha_before)
+            raise
+        verify_left_main(checkout, branch)
+        verify_new_commit(checkout, sha_before)
     title = f"Implement {branch}"
     push_and_open_pr(checkout, repo, branch, title)
     return verify_pr_exists(repo, branch)
 
 
+# Seat protocol exit codes (contracts/seat-guard-and-agent-protocol.md),
+# mapped by run_swe_agent_activity to typed ApplicationErrors.
+EXIT_SEAT_EXHAUSTED = 75
+EXIT_SEAT_INVALID = 77
+
+
+def _seat_status_line(status: str, usage: dict, **extra) -> str:
+    return json.dumps({
+        "seat_status": status,
+        **extra,
+        "utilization": usage.get("utilization"),
+        "rate_limit_type": usage.get("rate_limit_type"),
+    })
+
+
+async def main(argv: list[str]) -> int:
+    """CLI entry: `agent.py <repo> <branch> [feedback]`. Returns the exit
+    code. In seat mode the last stdout lines follow the seat protocol."""
+    import tempfile
+
+    repo, branch = argv[0], argv[1]
+    feedback = argv[2] if len(argv) > 2 else None
+    usage: dict = {}
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            pr_url = await run(repo, branch, Path(td), feedback, usage)
+        except SeatExhausted as e:
+            # e.resets_at, not usage["resets_at"]: the latter may belong to
+            # an earlier allowed window (seat_guard sets None on purpose).
+            print(_seat_status_line("exhausted", usage, resets_at=e.resets_at))
+            return EXIT_SEAT_EXHAUSTED
+        except SeatInvalid:
+            print(_seat_status_line("invalid", usage))
+            return EXIT_SEAT_INVALID
+    if _seat_token():
+        # seat_status line second-to-last, PR url stays last.
+        print(_seat_status_line("ok", usage))
+    print(pr_url)
+    return 0
+
+
 if __name__ == "__main__":
     import asyncio
     import sys
-    import tempfile
 
-    async def _main() -> None:
-        repo, branch = sys.argv[1], sys.argv[2]
-        feedback = sys.argv[3] if len(sys.argv) > 3 else None
-        usage: dict = {}
-        with tempfile.TemporaryDirectory() as td:
-            pr_url = await run(repo, branch, Path(td), feedback, usage)
-            if _seat_token():
-                # Seat protocol (contracts/seat-guard-and-agent-protocol.md):
-                # seat_status line second-to-last, PR url stays last.
-                print(json.dumps({
-                    "seat_status": "ok",
-                    "utilization": usage.get("utilization"),
-                    "rate_limit_type": usage.get("rate_limit_type"),
-                }))
-            print(pr_url)
-
-    asyncio.run(_main())
-    logger.flush()
+    try:
+        code = asyncio.run(main(sys.argv[1:]))
+    finally:
+        logger.flush()  # also on the exit-1 path, so its trace isn't lost
+    sys.exit(code)

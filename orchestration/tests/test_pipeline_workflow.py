@@ -21,7 +21,7 @@ import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client, WorkflowFailureError
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.worker import Worker
 
 from activities import (
@@ -50,9 +50,18 @@ def _pool(*seat_ids: str, max_concurrent: int = 1) -> dict:
 
 
 @contextlib.asynccontextmanager
-async def _harness(client: Client, run_id: str, activities: list, pool: dict | None = None):
+async def _harness(
+    client: Client, run_id: str, activities: list, pool: dict | None = None,
+    seat_overrides: list | None = None,
+):
     """Worker for the pipeline + a real CredentialPoolWorkflow (specs/009),
-    with the real seat activities pointed at that per-test pool."""
+    with the real seat activities pointed at that per-test pool.
+    `seat_overrides` replaces real seat activities by registered name."""
+    overridden = {a.__temporal_activity_definition.name for a in seat_overrides or []}
+    seat_activities = [
+        a for a in (acquire_seat_activity, release_seat_activity, report_seat_failure_activity)
+        if a.__name__ not in overridden
+    ] + list(seat_overrides or [])
     task_queue = f"{TASK_QUEUE}-{run_id}"
     pool_id = f"credential-pool-test-{run_id}"
     previous = os.environ.get("CREDENTIAL_POOL_ID")
@@ -61,8 +70,7 @@ async def _harness(client: Client, run_id: str, activities: list, pool: dict | N
         async with Worker(
             client, task_queue=task_queue,
             workflows=[AgentPipelineWorkflow, CredentialPoolWorkflow],
-            activities=[*activities, acquire_seat_activity, release_seat_activity,
-                        report_seat_failure_activity],
+            activities=[*activities, *seat_activities],
         ):
             pool_handle = await client.start_workflow(
                 CredentialPoolWorkflow.run, pool or _pool(), id=pool_id, task_queue=task_queue,
@@ -103,7 +111,9 @@ async def _wait_plan_parked(handle, n_results: int, timeout: float = 10.0) -> No
     workflow: if the signal lands in the same activation as the activity's
     completion, the SDK applies the signal first, and the workflow's
     deliberate post-activity reset of `_plan_decision` (stale-signal guard,
-    FR-016) then drops it — the run waits forever.
+    FR-016) then drops it — the run waits forever. On seats (specs/009) the
+    stage's lease release runs after the architect result, so "parked" also
+    needs no activity still pending.
     """
     done = {EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED, EventType.EVENT_TYPE_ACTIVITY_TASK_FAILED}
     for _ in range(int(timeout / 0.05)):
@@ -122,7 +132,8 @@ async def _wait_plan_parked(handle, n_results: int, timeout: float = 10.0) -> No
             in architect_scheduled
         ]
         if (len(results) >= n_results
-                and events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED):
+                and events[-1].event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED
+                and not (await handle.describe()).raw_description.pending_activities):
             return
         await asyncio.sleep(0.05)
     raise AssertionError(f"workflow not parked after {n_results} architect result(s) in {timeout}s")
@@ -149,9 +160,11 @@ def _stub_activities(calls: list, plan_outcomes: list, build_outcomes: list | No
 
     @activity.defn(name="architect_stage_activity")
     async def architect_stage_activity(
-        repo: str, branch: str, pr_url: str, attempt: int, feedback: str | None = None
+        repo: str, branch: str, pr_url: str, attempt: int, feedback: str | None = None,
+        seat_id: str | None = None,
     ) -> dict:
         calls.append(("architect_stage_activity", attempt, feedback))
+        calls.append(("architect_seat", seat_id))
         outcome = next(plan_iter)
         if isinstance(outcome, Exception):
             raise outcome
@@ -535,3 +548,131 @@ async def test_non_seat_build_failure_releases_lease():
 
     assert table["seat-a"]["active_leases"] == 0
     assert table["seat-a"]["exhausted_until"] is None
+
+
+def _architect_seats(calls):
+    return [c[1] for c in calls if c[0] == "architect_seat"]
+
+
+async def test_architect_seat_exhausted_hands_off_without_charging_plan_budget():
+    """US5: seat-a runs out mid-architect -> the same plan attempt re-runs on
+    seat-b; MAX_PLAN_ATTEMPTS is not charged (no failure feedback carried)."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    resets = "2099-01-01T00:00:00+00:00"
+    activities = _stub_activities(
+        calls, [_seat_error("SeatExhausted", "seat-a", resets), _plan_result()],
+    )
+
+    async with _harness(client, run_id, activities, _pool("seat-a", "seat-b")) as pool:
+        handle = await _start(client, run_id)
+        await _wait_plan_parked(handle, 2)
+        await handle.signal(AgentPipelineWorkflow.plan_approved)
+        result = await handle.result()
+        table = await pool.query(CredentialPoolWorkflow.seats)
+
+    assert result == "https://github.com/factory/repo/pull/2"
+    plan_calls = [c for c in calls if c[0] == "architect_stage_activity"]
+    assert plan_calls == [("architect_stage_activity", 1, None)] * 2
+    assert _architect_seats(calls) == ["seat-a", "seat-b"]
+    assert table["seat-a"]["exhausted_until"] == resets
+    assert table["seat-a"]["active_leases"] == 0
+    assert table["seat-b"]["active_leases"] == 0
+
+
+async def test_architect_pool_exhausted_fails_without_charging_plan_budget():
+    """US5 / FR-018: one-seat pool runs out during the architect stage ->
+    CredentialPoolExhausted fails the run as-is; no CO-2 charge, no retry."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    resets = "2099-01-01T00:00:00+00:00"
+    activities = _stub_activities(
+        calls, [_seat_error("SeatExhausted", "seat-a", resets), _plan_result()],
+    )
+
+    async with _harness(client, run_id, activities):
+        handle = await _start(client, run_id)
+        with pytest.raises(WorkflowFailureError) as exc:
+            await handle.result()
+
+    assert exc.value.cause.type == "CredentialPoolExhausted"
+    assert list(exc.value.cause.details) == [resets]
+    assert [c for c in calls if c[0] == "architect_stage_activity"] == [
+        ("architect_stage_activity", 1, None)
+    ]
+    assert not _build_calls(calls)
+
+
+def _failing_seat_activity(name: str):
+    @activity.defn(name=name)
+    async def failing(*args) -> None:
+        raise ApplicationError(f"{name}: pool unreachable", non_retryable=True)
+    return failing
+
+
+async def test_pool_unavailable_at_acquire_fails_without_charging_plan_budget():
+    """FR-019: the pool's own failure is typed CredentialPoolUnavailable and
+    re-raised by the plan loop, not charged as a CO-2 plan failure."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+
+    async with _harness(client, run_id, activities,
+                        seat_overrides=[_failing_seat_activity("acquire_seat_activity")]):
+        handle = await _start(client, run_id)
+        with pytest.raises(WorkflowFailureError) as exc:
+            await handle.result()
+
+    assert exc.value.cause.type == "CredentialPoolUnavailable"
+    assert not [c for c in calls if c[0] == "architect_stage_activity"]
+
+
+async def test_failed_release_neither_masks_nor_discards_a_finished_stage():
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+
+    # The unreleased plan lease stays held until LEASE_TTL, so Build needs a
+    # second slot on the seat (the real seat-a has max_concurrent: 2).
+    async with _harness(client, run_id, activities, _pool("seat-a", max_concurrent=2),
+                        seat_overrides=[_failing_seat_activity("release_seat_activity")]):
+        result = await _approve_and_result(client, run_id, await _start(client, run_id))
+
+    assert result == "https://github.com/factory/repo/pull/2"
+    assert len([c for c in calls if c[0] == "architect_stage_activity"]) == 1
+    assert len(_build_calls(calls)) == 1
+
+
+async def test_cancel_during_seat_backed_architect_stage_cancels_the_run():
+    """A workflow cancel must end the run Cancelled — not be charged as a
+    CO-2 plan failure (and retried), nor re-typed as a pool failure."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    started = asyncio.Event()
+
+    @activity.defn(name="architect_stage_activity")
+    async def blocking_architect(repo, branch, pr_url, attempt, feedback=None, seat_id=None):
+        calls.append(("architect_stage_activity", attempt, feedback))
+        started.set()
+        await asyncio.sleep(3600)
+
+    activities = [blocking_architect if a.__temporal_activity_definition.name
+                  == "architect_stage_activity" else a
+                  for a in _stub_activities(calls, [])]
+
+    async with _harness(client, run_id, activities) as pool:
+        handle = await _start(client, run_id)
+        await asyncio.wait_for(started.wait(), 10)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError) as exc:
+            await handle.result()
+        table = await pool.query(CredentialPoolWorkflow.seats)
+
+    assert isinstance(exc.value.cause, CancelledError)
+    assert len([c for c in calls if c[0] == "architect_stage_activity"]) == 1
+    assert table["seat-a"]["active_leases"] == 0

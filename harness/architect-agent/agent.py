@@ -22,6 +22,23 @@ import braintrust
 from claude_agent_sdk import ClaudeAgentOptions, query
 from dotenv import load_dotenv
 
+
+def _load_sibling(name: str, filename: str):
+    """Load a module next to this file by path. The worker loads this
+    agent.py by path, so its directory is not on sys.path and a plain
+    `import seat_guard` would not resolve."""
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / filename)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# specs/009: subscription-seat guard, byte-identical to swe-agent's copy.
+seat_guard = _load_sibling("architect_agent_seat_guard", "seat_guard.py")
+SeatExhausted = seat_guard.SeatExhausted
+SeatInvalid = seat_guard.SeatInvalid
+
 # Load this repo's own root .env (never the developer's shell profile),
 # without overriding a value already present in the process environment.
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
@@ -106,16 +123,44 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
-async def _model_text(prompt: str, options: ClaudeAgentOptions) -> str:
-    """Run `query()` and return only the model's final text result."""
+def _model_env(seat_token: str | None) -> dict[str, str]:
+    """LiteLLM-routed by default (§3.4). A seat-backed run goes direct to
+    Anthropic with the seat's OAuth token as its only credential — the
+    documented §3.4 deviation for subscription seats (specs/009, research
+    R4: LiteLLM can't pool OAuth tokens)."""
+    if seat_token:
+        return seat_guard.seat_options_env(seat_token)
+    return {"ANTHROPIC_BASE_URL": LITELLM_BASE_URL, "ANTHROPIC_API_KEY": LITELLM_API_KEY}
+
+
+def _judge_options(seat_token: str | None = None) -> ClaudeAgentOptions:
+    """Options for the tool-less score/synthesis/critic calls."""
+    return ClaudeAgentOptions(
+        tools=[], setting_sources=[], permission_mode="default", model=MODEL,
+        env=_model_env(seat_token),
+    )
+
+
+async def _model_text(
+    prompt: str, options: ClaudeAgentOptions, usage: dict | None = None,
+) -> str:
+    """Run `query()` and return only the model's final text result. With
+    `usage` (seat mode) the stream goes through seat_guard, which records
+    the seat's last-seen usage there and raises SeatExhausted/SeatInvalid."""
+    stream = (
+        seat_guard.guarded_query(prompt, options, usage, query_fn=query)
+        if usage is not None
+        else query(prompt=prompt, options=options)
+    )
     text: str | None = None
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, str):
-            text = message  # test doubles yield plain strings directly
-        else:
-            result = getattr(message, "result", None)
-            if result is not None:
-                text = result
+    async with contextlib.aclosing(stream) as messages:
+        async for message in messages:
+            if isinstance(message, str):
+                text = message  # test doubles yield plain strings directly
+            else:
+                result = getattr(message, "result", None)
+                if result is not None:
+                    text = result
     if text is None:
         raise RuntimeError(f"Model call produced no usable text result for prompt: {prompt!r}")
     return text
@@ -265,17 +310,14 @@ Respond with exactly one JSON object, nothing else, with this shape:
 non-empty."""
 
 
-def _candidate_options(checkout: Path) -> ClaudeAgentOptions:
+def _candidate_options(checkout: Path, seat_token: str | None = None) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         cwd=str(checkout),
         tools=["Read", "Grep", "Glob"],
         setting_sources=[],
         permission_mode="default",
         model=MODEL,
-        env={
-            "ANTHROPIC_BASE_URL": LITELLM_BASE_URL,
-            "ANTHROPIC_API_KEY": LITELLM_API_KEY,
-        },
+        env=_model_env(seat_token),
     )
 
 
@@ -286,6 +328,8 @@ async def generate_candidate(
     *,
     gap: str | None = None,
     synthesized_plan: dict | None = None,
+    seat_token: str | None = None,
+    usage: dict | None = None,
 ) -> dict:
     """Produce one Architect Candidate. Exactly one of "both `gap` and
     `synthesized_plan` set" (gap-targeted, FR-009) or "both `None`"
@@ -308,11 +352,11 @@ async def generate_candidate(
             spec_dir=spec_dir,
         )
 
-    options = _candidate_options(checkout)
+    options = _candidate_options(checkout, seat_token)
 
     result: dict = {"angle": angle, "valid": False, "plan_md": "", "tasks_md": "", "adrs": []}
     try:
-        text = await _model_text(prompt, options)
+        text = await _model_text(prompt, options, usage)
         envelope = _parse_json_envelope(text)
         plan_md = (envelope.get("plan_md") or "").strip()
         tasks_md = (envelope.get("tasks_md") or "").strip()
@@ -327,6 +371,8 @@ async def generate_candidate(
             result.update(
                 {"valid": True, "error": None, "plan_md": plan_md, "tasks_md": tasks_md, "adrs": adrs}
             )
+    # SeatExhausted/SeatInvalid subclass Exception directly, so they pass
+    # through here untouched (specs/009 FR-011).
     except (ValueError, RuntimeError) as e:
         result["error"] = str(e)
 
@@ -346,12 +392,20 @@ def angles_for(n: int) -> list[str]:
     return ANGLES[:n]
 
 
-async def generate_candidates(checkout: Path, spec_dir: str, angles: list[str]) -> list[dict]:
-    """`asyncio.gather` over `generate_candidate()` in fan-out mode, one
-    call per angle, bounded by `CANDIDATE_CONCURRENCY` in-flight CLI
+async def generate_candidates(
+    checkout: Path, spec_dir: str, angles: list[str],
+    *, seat_token: str | None = None, usage: dict | None = None,
+) -> list[dict]:
+    """An `asyncio.TaskGroup` over `generate_candidate()` in fan-out mode,
+    one call per angle, bounded by `CANDIDATE_CONCURRENCY` in-flight CLI
     subprocesses and a `CANDIDATE_TIMEOUT_S` per-call timeout. Must be
     called inside the stage's single `_no_git_credentials()` window —
     this function does not manipulate `os.environ` itself.
+
+    Any error escaping a candidate cancels its siblings (unlike the old
+    `asyncio.gather`, which left them running). For a seat outcome that is
+    the point (specs/009 FR-013): siblings would only keep spending an
+    exhausted or dead seat, and the whole stage re-runs on the next seat.
     """
     semaphore = asyncio.Semaphore(CANDIDATE_CONCURRENCY)
 
@@ -359,7 +413,10 @@ async def generate_candidates(checkout: Path, spec_dir: str, angles: list[str]) 
         async with semaphore:
             try:
                 return await asyncio.wait_for(
-                    generate_candidate(checkout, spec_dir, angle), CANDIDATE_TIMEOUT_S
+                    generate_candidate(
+                        checkout, spec_dir, angle, seat_token=seat_token, usage=usage,
+                    ),
+                    CANDIDATE_TIMEOUT_S,
                 )
             except TimeoutError:
                 return {
@@ -367,10 +424,32 @@ async def generate_candidates(checkout: Path, spec_dir: str, angles: list[str]) 
                     "plan_md": "", "tasks_md": "", "adrs": [],
                 }
 
-    results = await asyncio.gather(*(_bounded(angle) for angle in angles))
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(_bounded(angle)) for angle in angles]
+    except BaseExceptionGroup as group_error:
+        raise _unwrap_fanout_error(group_error) from None
+    results = [task.result() for task in tasks]
     for index, result in enumerate(results):
         result["index"] = index
     return results
+
+
+def _unwrap_fanout_error(group_error: BaseExceptionGroup) -> BaseException:
+    """The one exception a fan-out failure surfaces as, never the group (whose
+    "unhandled errors in a TaskGroup" text would hide the cause): a seat
+    outcome first (SeatInvalid before SeatExhausted — a dead token is the
+    more definite verdict), else the first error, as `asyncio.gather` did.
+    The others are kept as notes on it."""
+    errors = group_error.exceptions
+    chosen = next(
+        (e for kind in (SeatInvalid, SeatExhausted) for e in errors if isinstance(e, kind)),
+        errors[0],
+    )
+    for other in errors:
+        if other is not chosen:
+            chosen.add_note(f"also raised by a sibling candidate: {type(other).__name__}: {other}")
+    return chosen
 
 
 # --- User Story 2: score, synthesize, persist, post -----------------------
@@ -462,7 +541,10 @@ def _format_candidates_for_prompt(candidates: list[dict], *, labeled: bool = Fal
     return "\n\n".join(parts)
 
 
-async def score_candidates(candidates: list[dict], sc_ids: list[tuple[str, str]]) -> list[dict]:
+async def score_candidates(
+    candidates: list[dict], sc_ids: list[tuple[str, str]],
+    *, seat_token: str | None = None, usage: dict | None = None,
+) -> list[dict]:
     """FR-005. One model call over all valid candidates. Strict, total
     Python validation of the returned coverage/consistency structure.
     Candidate presentation order is randomised to mitigate position bias;
@@ -480,11 +562,7 @@ async def score_candidates(candidates: list[dict], sc_ids: list[tuple[str, str]]
         criteria=_format_criteria(sc_ids),
         candidates=_format_candidates_for_prompt(shuffled, labeled=True),
     )
-    options = ClaudeAgentOptions(
-        tools=[], setting_sources=[], permission_mode="default", model=MODEL,
-        env={"ANTHROPIC_BASE_URL": LITELLM_BASE_URL, "ANTHROPIC_API_KEY": LITELLM_API_KEY},
-    )
-    text = await _model_text(prompt, options)
+    text = await _model_text(prompt, _judge_options(seat_token), usage)
     envelope = _parse_json_envelope(text)
 
     raw_scores = envelope.get("scores") or []
@@ -533,7 +611,8 @@ def pick_winner(scores: list[dict]) -> int:
 
 
 async def synthesize(
-    candidates: list[dict], scores: list[dict], winner_index: int, feedback: str | None = None
+    candidates: list[dict], scores: list[dict], winner_index: int, feedback: str | None = None,
+    *, seat_token: str | None = None, usage: dict | None = None,
 ) -> dict:
     """FR-004, FR-005a. One model call, distinct from `score_candidates()`.
     Returns exactly one Synthesis Result or raises."""
@@ -558,11 +637,7 @@ async def synthesize(
         ),
         feedback_section=feedback_section,
     )
-    options = ClaudeAgentOptions(
-        tools=[], setting_sources=[], permission_mode="default", model=MODEL,
-        env={"ANTHROPIC_BASE_URL": LITELLM_BASE_URL, "ANTHROPIC_API_KEY": LITELLM_API_KEY},
-    )
-    text = await _model_text(prompt, options)
+    text = await _model_text(prompt, _judge_options(seat_token), usage)
     envelope = _parse_json_envelope(text)
 
     plan_md = (envelope.get("plan_md") or "").strip()
@@ -586,7 +661,8 @@ async def synthesize(
 
 
 async def check_completeness(
-    synthesized: dict, sc_ids: list[tuple[str, str]], angles_tried: list[str]
+    synthesized: dict, sc_ids: list[tuple[str, str]], angles_tried: list[str],
+    *, seat_token: str | None = None, usage: dict | None = None,
 ) -> dict:
     """FR-007a, FR-007b. One model call with a fresh context, withholding
     the judge's rationale, the score records, and every candidate's plan
@@ -599,11 +675,7 @@ async def check_completeness(
         angles_tried=", ".join(angles_tried),
         plan_md=synthesized["plan_md"],
     )
-    options = ClaudeAgentOptions(
-        tools=[], setting_sources=[], permission_mode="default", model=MODEL,
-        env={"ANTHROPIC_BASE_URL": LITELLM_BASE_URL, "ANTHROPIC_API_KEY": LITELLM_API_KEY},
-    )
-    text = await _model_text(prompt, options)
+    text = await _model_text(prompt, _judge_options(seat_token), usage)
     envelope = _parse_json_envelope(text)
 
     uncovered = envelope.get("uncovered") or []
@@ -801,9 +873,15 @@ async def run_architect_stage(
     n_candidates: int | None = None,
     push: bool = True,
     sc_loader=None,
+    seat_token: str | None = None,
 ) -> dict:
     """The stage entrypoint. See
-    contracts/architect-agent-interface.md for the full sequence."""
+    contracts/architect-agent-interface.md for the full sequence.
+
+    `seat_token` (specs/009): run every model call on that subscription
+    seat, direct to Anthropic. A seat outcome raises SeatExhausted /
+    SeatInvalid before anything is persisted, pushed or posted; on success
+    the result carries the seat's last-seen usage under `_seat_usage`."""
     _validate_repo(repo)
     _validate_branch(branch)
     if attempt < 1:
@@ -823,11 +901,15 @@ async def run_architect_stage(
 
         malformed_retries_used = 0
         gap_round_ran = False
+        # Seat mode only: shared by every model call of this stage, so it
+        # ends holding the seat's last-seen usage (seat_guard updates it).
+        usage: dict | None = {} if seat_token else None
+        seat = {"seat_token": seat_token, "usage": usage}
 
         with _no_git_credentials():
             n = candidate_count([id_ for id_, _ in sc_ids], n_override=n_candidates)
             angles = angles_for(n)
-            candidates = await generate_candidates(checkout, spec_dir, angles)
+            candidates = await generate_candidates(checkout, spec_dir, angles, **seat)
 
             while not any(c["valid"] for c in candidates):
                 if malformed_retries_used >= MAX_MALFORMED_RETRIES:
@@ -836,21 +918,24 @@ async def run_architect_stage(
                         f"{malformed_retries_used} retries"
                     )
                 malformed_retries_used += 1
-                candidates = await generate_candidates(checkout, spec_dir, angles)
+                candidates = await generate_candidates(checkout, spec_dir, angles, **seat)
 
             valid_candidates = [c for c in candidates if c["valid"]]
-            scores = await score_candidates(valid_candidates, sc_ids)
+            scores = await score_candidates(valid_candidates, sc_ids, **seat)
             winner_index = pick_winner(scores)
-            synthesized = await synthesize(valid_candidates, scores, winner_index, feedback)
+            synthesized = await synthesize(
+                valid_candidates, scores, winner_index, feedback, **seat,
+            )
 
             completeness = await check_completeness(
-                synthesized, sc_ids, [c["angle"] for c in valid_candidates]
+                synthesized, sc_ids, [c["angle"] for c in valid_candidates], **seat,
             )
 
             if completeness["gap_found"] and not gap_round_ran:
                 gap_text = completeness["missed_angle"] or ", ".join(completeness["uncovered"])
                 gap_candidate = await generate_candidate(
-                    checkout, spec_dir, gap_text, gap=gap_text, synthesized_plan=synthesized
+                    checkout, spec_dir, gap_text, gap=gap_text, synthesized_plan=synthesized,
+                    **seat,
                 )
                 gap_candidate["index"] = len(candidates)
                 candidates = candidates + [gap_candidate]
@@ -858,9 +943,11 @@ async def run_architect_stage(
 
                 if gap_candidate["valid"]:
                     valid_candidates = [c for c in candidates if c["valid"]]
-                    scores = await score_candidates(valid_candidates, sc_ids)
+                    scores = await score_candidates(valid_candidates, sc_ids, **seat)
                     winner_index = pick_winner(scores)
-                    synthesized = await synthesize(valid_candidates, scores, winner_index, feedback)
+                    synthesized = await synthesize(
+                        valid_candidates, scores, winner_index, feedback, **seat,
+                    )
 
         persist_synthesized(checkout, spec_dir, synthesized)
         commit_sha = _run(["git", "rev-parse", "HEAD"], cwd=checkout)
@@ -878,7 +965,7 @@ async def run_architect_stage(
         {"angle": c["angle"], "error": c.get("error")} for c in candidates if not c["valid"]
     ]
 
-    return {
+    result = {
         "attempt": attempt,
         "plan_md": synthesized["plan_md"],
         "tasks_md": synthesized["tasks_md"],
@@ -894,6 +981,9 @@ async def run_architect_stage(
         "commit_sha": commit_sha,
         "comment_body": comment_body,
     }
+    if usage is not None:
+        result["_seat_usage"] = usage
+    return result
 
 
 if __name__ == "__main__":

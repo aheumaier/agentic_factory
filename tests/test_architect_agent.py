@@ -860,3 +860,106 @@ def test_gap_candidate_sees_synthesized_plan(monkeypatch):
     prompt = fake.calls[0]["prompt"]
     assert "gap-desc" in prompt
     assert "the synthesized plan text here" in prompt
+
+
+# --- specs/009 T037: seat mode -----------------------------------------------
+
+import claude_agent_sdk as sdk  # noqa: E402 - section-local, mirrors test_seat_guard
+
+SEAT_TOKEN = "sk-ant-oat01-test-only-not-a-real-token"
+
+
+def _rejected_event():
+    raw = {"unifiedWindows": {"five_hour": {"utilization": 1.0}}}
+    return sdk.RateLimitEvent(
+        sdk.RateLimitInfo(status="rejected", resets_at=1791655200, raw=raw)
+    )
+
+
+def test_seat_mode_options_carry_seat_token_only(tmp_path):
+    for options in (arch._candidate_options(tmp_path, SEAT_TOKEN),
+                    arch._judge_options(SEAT_TOKEN)):
+        assert options.env == {
+            "CLAUDE_CODE_OAUTH_TOKEN": SEAT_TOKEN,
+            "ANTHROPIC_API_KEY": "", "ANTHROPIC_BASE_URL": "", "ANTHROPIC_AUTH_TOKEN": "",
+        }
+
+
+def test_non_seat_options_unchanged_litellm_routed(tmp_path):
+    litellm = {"ANTHROPIC_BASE_URL": arch.LITELLM_BASE_URL,
+               "ANTHROPIC_API_KEY": arch.LITELLM_API_KEY}
+    assert arch._candidate_options(tmp_path).env == litellm
+    assert arch._judge_options().env == litellm
+
+
+def test_seat_mode_judge_call_uses_seat_env_and_records_usage(monkeypatch):
+    fake = _make_query([json.dumps({"uncovered": [], "missed_angle": None, "note": ""})])
+    monkeypatch.setattr(arch, "query", fake)
+
+    async def with_usage_event(*, prompt, options=None):
+        yield sdk.RateLimitEvent(sdk.RateLimitInfo(
+            raw={"unifiedWindows": {"seven_day": {"utilization": 0.42}}}))
+        async for message in fake(prompt=prompt, options=options):
+            yield message
+    monkeypatch.setattr(arch, "query", with_usage_event)
+
+    usage: dict = {}
+    asyncio.run(arch.check_completeness(
+        {"plan_md": "p"}, SC_IDS, [], seat_token=SEAT_TOKEN, usage=usage,
+    ))
+    assert fake.calls[0]["options"].env["CLAUDE_CODE_OAUTH_TOKEN"] == SEAT_TOKEN
+    assert usage["utilization"] == 0.42
+
+
+def test_seat_outcome_in_one_candidate_cancels_siblings(tmp_path, monkeypatch):
+    angles = arch.angles_for(3)
+    cancelled: list[str] = []
+
+    async def fake_query(*, prompt, options=None):
+        if angles[0] in prompt:
+            await asyncio.sleep(0.01)  # let the siblings start first
+            yield _rejected_event()
+            return
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.append(prompt)
+            raise
+        yield _candidate_envelope()
+
+    monkeypatch.setattr(arch, "query", fake_query)
+    with pytest.raises(arch.SeatExhausted) as exc:
+        asyncio.run(arch.generate_candidates(
+            tmp_path, "specs/x", angles, seat_token=SEAT_TOKEN, usage={},
+        ))
+    assert exc.value.resets_at == 1791655200
+    assert len(cancelled) == 2  # both siblings torn down, not left running
+
+
+def test_unwrap_fanout_error_prefers_seat_outcomes():
+    # Pure, so the "both raised before cancellation landed" case is
+    # deterministic rather than scheduler-dependent.
+    exhausted, invalid, other = arch.SeatExhausted(), arch.SeatInvalid(), RuntimeError("x")
+    unwrap = arch._unwrap_fanout_error
+    assert unwrap(BaseExceptionGroup("g", [other, exhausted, invalid])) is invalid
+    assert unwrap(BaseExceptionGroup("g", [other, exhausted])) is exhausted
+    assert unwrap(BaseExceptionGroup("g", [other])) is other
+    first, second = RuntimeError("first"), RuntimeError("second")
+    assert unwrap(BaseExceptionGroup("g", [first, second])) is first  # never the group
+    assert any("second" in note for note in first.__notes__)
+
+
+def test_fanout_non_seat_error_surfaces_unwrapped(tmp_path, monkeypatch):
+    """TaskGroup must not turn a lone non-seat error into an ExceptionGroup
+    (asyncio.gather never did); candidate-level ValueError/RuntimeError are
+    still swallowed into an invalid candidate as before."""
+    angles = arch.angles_for(2)
+
+    async def fake_query(*, prompt, options=None):
+        if angles[0] in prompt:
+            raise sdk.ResultError("boom", data={"api_error_status": 500})
+        yield _candidate_envelope()
+
+    monkeypatch.setattr(arch, "query", fake_query)
+    with pytest.raises(sdk.ResultError):
+        asyncio.run(arch.generate_candidates(tmp_path, "specs/x", angles))

@@ -123,3 +123,10 @@ def _load_agent(name: str, path: Path) -> types.ModuleType:
 architect_agent = _load_agent(
     "architect_agent", REPO_ROOT / "harness" / "architect-agent" / "agent.py"
 )
+
+# swe-agent's agent.py does a plain `import seat_guard` (its directory is on
+# sys.path when it runs as a script). harness/swe-agent can't go on sys.path
+# here — its agent.py would then shadow pm-agent's for `import agent` — so
+# pre-load the sibling by path under the name agent.py imports (specs/009).
+_load_agent("seat_guard", REPO_ROOT / "harness" / "swe-agent" / "seat_guard.py")
+swe_agent = _load_agent("swe_agent", REPO_ROOT / "harness" / "swe-agent" / "agent.py")

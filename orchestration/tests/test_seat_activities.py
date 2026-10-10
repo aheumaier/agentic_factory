@@ -177,3 +177,90 @@ async def test_unknown_seat_fails_before_any_sandbox(sandbox):
     with pytest.raises(KeyError, match="unknown seat"):
         await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-z")
     assert box.created_with == {}
+
+
+# --- architect_stage_activity on seats (T035) -----------------------------------
+
+@pytest.fixture
+def architect(monkeypatch):
+    """Replace run_architect_stage; returns the kwargs it was called with."""
+    seen: dict = {}
+    monkeypatch.setenv("CLAUDE_OAUTH_SEAT_A", TOKEN)
+    monkeypatch.delenv("CREDENTIAL_POOL_CONFIG", raising=False)
+    monkeypatch.setattr(activities, "_HEARTBEAT_INTERVAL_SECONDS", 3600)
+
+    def use(outcome):
+        async def fake(repo, branch, pr_url, attempt, **kwargs):
+            seen.update(kwargs)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return dict(outcome)
+        monkeypatch.setattr(activities._architect_agent, "run_architect_stage", fake)
+        return seen
+
+    return use
+
+
+def _arch(seat_id="seat-a"):
+    return activities.architect_stage_activity(
+        "o/r", "feat-x", "https://github.com/o/r/pull/1", 1, None, seat_id,
+    )
+
+
+async def test_architect_seat_mode_passes_token_and_reports_usage(architect):
+    seen = architect({"plan_md": "p", "_seat_usage": {
+        "utilization": 0.4, "rate_limit_type": "seven_day", "resets_at": 1}})
+    result = await _arch()
+    assert seen["seat_token"] == TOKEN
+    assert "_seat_usage" not in result
+    assert result["seat_id"] == "seat-a"
+    assert (result["utilization"], result["rate_limit_type"]) == (0.4, "seven_day")
+
+
+async def test_architect_idempotent_hit_on_seat_has_null_usage(architect):
+    architect({"attempt": 1, "comment_body": "c", "idempotent_hit": True})
+    result = await _arch()
+    assert result["idempotent_hit"] is True
+    assert result["utilization"] is None
+
+
+async def test_architect_without_seat_stays_litellm_routed(architect):
+    seen = architect({"plan_md": "p"})
+    result = await _arch(seat_id=None)
+    assert seen["seat_token"] is None
+    assert "seat_id" not in result
+
+
+async def test_architect_seat_exhausted_maps_before_plan_failure_types(architect):
+    architect(activities._architect_agent.SeatExhausted(1791655200, {"utilization": 1.0}))
+    with pytest.raises(ApplicationError) as exc:
+        await _arch()
+    assert exc.value.type == "SeatExhausted"
+    assert exc.value.non_retryable
+    assert list(exc.value.details) == ["seat-a", "2026-10-10T18:00:00+00:00"]
+
+
+async def test_architect_seat_invalid_maps_to_typed_error(architect):
+    architect(activities._architect_agent.SeatInvalid())
+    with pytest.raises(ApplicationError) as exc:
+        await _arch()
+    assert exc.value.type == "SeatInvalid"
+    assert list(exc.value.details) == ["seat-a"]
+    assert TOKEN not in str(exc.value)
+
+
+async def test_architect_plan_failure_mapping_unchanged(architect):
+    architect(ValueError("no SC ids"))
+    with pytest.raises(ApplicationError) as exc:
+        await _arch()
+    assert exc.value.type == "PlanDeterministicFailure"
+
+
+async def test_architect_missing_seat_token_is_typed_pool_failure(architect, monkeypatch):
+    architect({"plan_md": "p"})
+    monkeypatch.delenv("CLAUDE_OAUTH_SEAT_A")
+    with pytest.raises(ApplicationError) as exc:
+        await _arch()
+    assert exc.value.type == "CredentialPoolUnavailable"
+    assert exc.value.non_retryable
+    assert "CLAUDE_OAUTH_SEAT_A" in str(exc.value)

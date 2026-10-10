@@ -56,6 +56,10 @@ for handoff in range(MAX_SEAT_HANDOFFS + 1):
 raise ApplicationError(type="SeatHandoffsExhausted", details=[stage, MAX_SEAT_HANDOFFS])
 ```
 
-Both raised failures are `non_retryable=True`. The Build loop does not catch them, so they fail the run. The plan loop's existing `except` must check `cause.type in {"CredentialPoolExhausted", "SeatHandoffsExhausted"}` **before** its budget-charging branch, and re-raise without charging, the same way it handles `MalformedRetriesExhausted`.
+A third type, `CredentialPoolUnavailable`, wraps any seat activity (acquire or report) that still fails after `_TRANSIENT_RETRY`, i.e. the pool itself is down. A failed **release** is best effort and only logged: it must not mask the stage's result or error, and the lease ages out via `LEASE_TTL`.
 
-Gated by `workflow.patched("seat-pool-v1")`. On the unpatched path, Build and Architect are called exactly as before.
+A workflow cancel (`ActivityError` whose cause is `CancelledError`) is never re-typed and never charged; it propagates, so the run ends Cancelled. `architect_stage_activity` raises a missing seat token or an unknown seat as a non-retryable `CredentialPoolUnavailable`, which the plan loop also re-raises uncharged.
+
+All three raised failures are `non_retryable=True`. The Build loop does not catch them, so they fail the run. The plan loop's existing `except` must check the type against `{"CredentialPoolExhausted", "SeatHandoffsExhausted", "CredentialPoolUnavailable"}` **before** its budget-charging branch, and re-raise without charging, the same way it handles `MalformedRetriesExhausted`.
+
+Gated by `workflow.patched("seat-pool-v1")` for Build and `workflow.patched("architect-seat-pool-v1")` for the plan loop. They need separate IDs because `patched()` is memoized per ID. On the unpatched path, Build and Architect are called exactly as before.

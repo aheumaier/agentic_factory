@@ -161,6 +161,10 @@ Each Phase 2 process step maps to one layer below and the building block chosen 
 
 **Inputs/Outputs:** Input: a model call from the harness (prompt, tool schema, target capability). Output: a routed response, with cost and latency metadata sent to Observability.
 
+**Deviation: subscription seats (specs/009-credential-pool-handoff).** Seat-backed model calls — the Temporal path's Build stage (`swe-agent`) and architect stage — bypass LiteLLM. They authenticate with a Claude Max subscription seat's OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`) straight to Anthropic, with every inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` blanked so the seat token is the only credential the CLI sees. LiteLLM can forward a caller's OAuth token per request, but it cannot hold a pool of them, pick one, or rotate on exhaustion (research R4). So the pool lives in the durable layer instead: `CredentialPoolWorkflow` (§3.5) leases seats, keeps each seat's last-seen utilization, and `_with_seat` hands a stage to another seat when one runs out, resuming from the stage's pushed checkpoints. The cost of the deviation: seat calls carry no LiteLLM cost/latency metadata, and their key policy lives in `orchestration/credentials/pool.yaml` + `.env`, not the proxy. Follow-up: if LiteLLM gains OAuth pass-through with pooling, route seat calls back through it.
+
+**Usage constraint (binding):** the seat pool is for internal, single-operator use only — the seats belong to the operator running this pipeline, and neither the pipeline nor its seats are ever offered to third parties (Agent SDK terms). Rotating several subscription seats to extend usage limits is a Consumer-Terms grey area the operator accepted knowingly (2026-10-10). Seat pooling is not a supported product feature; see specs/009's spec.md.
+
 ### 3.5 Orchestration/Durable Execution
 
 **Purpose:** Sequence the factory's own multi-stage pipeline (intake → build → test → gate → deploy) and an individual agent's long-running, multi-step tasks, with crash-safe, replayable state — so a failed step resumes rather than restarts.

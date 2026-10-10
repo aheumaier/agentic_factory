@@ -53,6 +53,21 @@ this repo's default convention and `pm-agent`'s `review_spec()` — this
 stage runs on the Temporal worker host, which can reach the self-hosted
 proxy, unlike `pm-agent`'s `shape_issue()` on a target-repo runner.
 
+**Except on a subscription seat (specs/009).** When `architect_stage_activity`
+gets a `seat_id` from the credential pool, `run_architect_stage(...,
+seat_token=...)` runs every model call direct to Anthropic on that seat's
+OAuth token, through `seat_guard.py`, which is loaded by path. That includes
+candidates, scoring, synthesis and the critic. This is a documented §3.4
+deviation (research R4). If any candidate hits a seat outcome, the
+`asyncio.TaskGroup` cancels its sibling candidates, and the stage raises
+`SeatExhausted`/`SeatInvalid` before anything is persisted, pushed or posted.
+The activity maps that to the typed error, and the workflow re-runs the same
+plan attempt on another seat without charging `MAX_PLAN_ATTEMPTS`. Unlike
+Build, the architect stage has no checkpoints: a handoff re-runs the whole
+fan-out.
+
+**Usage constraint (binding):** internal, single-operator use only. The seats belong to the operator running this pipeline; neither the pipeline nor its seats are ever offered to third parties (Agent SDK terms). Rotating several subscription seats is a Consumer-Terms grey area the operator accepted knowingly (2026-10-10). This is not a supported product feature; see `specs/009-credential-pool-handoff/spec.md`.
+
 ## Deviation from `docs/70-multi-agent-pipeline-design.md` §2
 
 The design doc's Architect step 2 has the judge consume each
@@ -152,3 +167,12 @@ done — only the Architect stage moved.
   here** — it resolves to `001-agent-spec-schema-test` on any checkout
   of this repo, so this feature's own Eval-Gate score stays unreachable,
   the same as `003-pm-agent-review-gate`'s.
+- **No checkpointing across a seat handoff.** A handoff re-runs the whole stage, so
+  candidate work from the exhausted seat is discarded.
+- **No durable sleep-until-reset.** When every eligible seat is out, the run
+  fails with `CredentialPoolExhausted` (earliest reset in its details) instead
+  of waiting for the reset.
+- **No token-expiry alert.** `token_expires_on` in `pool.yaml` is recorded,
+  but nothing warns before a seat's `claude setup-token` token expires. An
+  expired token surfaces as `SeatInvalid`, and the operator re-runs
+  `reset_seat` after renewing it.
