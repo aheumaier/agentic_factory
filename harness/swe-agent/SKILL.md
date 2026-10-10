@@ -2,8 +2,9 @@
 name: swe-agent
 description: >-
   GitHub-issue-driven SWE agent (Harness/Runtime, agent-factory-architecture.md
-  §3.2) that runs GitHub Spec Kit's /speckit-implement against an
-  already-planned feature branch and opens a PR.
+  §3.2) that implements an already-planned Spec Kit feature branch, one
+  model session per open task (or one /speckit-implement session), and
+  opens a PR.
 ---
 
 # SWE agent
@@ -18,11 +19,15 @@ this agent's system-prompt-as-data; keep the two in sync if either changes.
   (agent-swe-design.md §5 steps 1-3, mapped to Spec/Intake §3.1) happen
   upstream, manually, before this agent runs — committed to
   `specs/NNN-slug/` on a feature branch that already exists. This agent
-  starts at `/speckit-implement` (§5 step 4 onward).
-- **Host tempdir, not E2B.** Runs unsandboxed in a host temp directory
-  this pass (Execution Sandbox, §3.3, is deferred — see repo's
-  `sandbox/`, not yet wired to this agent). Reuses this machine's
-  already-authenticated `gh` CLI session rather than a scoped token.
+  starts at implementation (§5 step 4 onward): one model session per open
+  task (specs/011 F7-a, see below), or one `/speckit-implement` session on
+  a Gate-feedback retry, when an open task has no ID, or when the branch
+  has several task files.
+- **E2B sandbox.** Both triggers (Temporal's `run_swe_agent_activity` and
+  `.github/workflows/swe-agent-build.yml`) run `agent.py` inside the
+  `swe-agent-sandbox` E2B template (Execution Sandbox, §3.3). git and `gh`
+  authenticate with a `GH_TOKEN` env var (a GitHub App installation token)
+  when it is set, else with the host's `gh` credential helper.
 - **Direct-to-Anthropic, not LiteLLM-routed.** `/speckit-implement` only
   exists as a Claude Code skill, so this agent is Claude-Agent-SDK/
   Anthropic-only by construction; LiteLLM routing (§3.4) and
@@ -40,7 +45,16 @@ the seat's OAuth token as `CLAUDE_CODE_OAUTH_TOKEN`, with no API key, and
 `seat_guard.py` makes it the only credential the CLI sees. Calls go direct to
 Anthropic, a documented §3.4 deviation.
 
-- **Checkpoints (specs/011).** The run prompt tells the model to skip tasks
+- **One session per task (specs/011 F7-a).** The model may batch its ticks,
+  so `agent.py` runs one model session per open task, in file order
+  (`TASK_PROMPT`: implement only `<ID>`, mark it `[X]`, stop, don't commit).
+  A task already marked `[X]` gets no session. A session that leaves its
+  task open ends the loop. After each session, leftover edits are committed
+  as `checkpoint: end of <ID>`. A Gate-feedback retry, an open task with no
+  ID, or several task files keep the single `/speckit-implement` session.
+  Cost: N CLI sessions per Build, each re-reading the spec and plan, so more
+  seat usage, and no shared context between tasks.
+- **Checkpoints (specs/011).** The prompt tells the model to skip tasks
   already marked `[X]` and to mark each task `[X]` as soon as it finishes it.
   The harness, not the model, then saves the checkpoint: after every streamed
   message, when the feature's set of done task IDs has grown and the tree is
@@ -99,6 +113,6 @@ sandbox isolation `sandbox/` is meant to eventually provide.
   pool's `seats()` table shows `expires_in_days`. Nothing posts to a PR or to
   Teams. An expired token surfaces as `SeatInvalid`; after renewing it, the
   operator runs `reset_seat`.
-- **Tick granularity is the model's.** If the model marks several tasks
-  `[X]` in one edit, they land in one checkpoint, so a handoff can still
-  redo at most the tasks in that batch.
+- **Tick granularity in a single session is the model's.** On the
+  single-session paths above, several tasks marked `[X]` in one edit land
+  in one checkpoint, so a handoff there can still redo at most that batch.

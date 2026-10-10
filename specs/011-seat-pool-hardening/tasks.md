@@ -130,11 +130,27 @@
 
 ---
 
+## Phase 11: Fork F7-a - one model session per task (operator-ruled 2026-10-11)
+
+**Goal**: A Build drives one model session per open task, so a seat outcome cuts off at most the task in progress, even when the model would batch its ticks (spec.md FR-023–FR-026, research R10).
+
+**Independent Test**: A prompt-aware scripted model ticks only the task its prompt names; three open tasks → three sessions, in order, with three checkpoints.
+
+- [X] T034 Record the operator's confirmation of F1–F6 and the F7-a ruling in spec.md "Clarifications" (session 2026-10-11), add FR-023–FR-026, research R10 and the contract note
+- [X] T035 In harness/swe-agent/agent.py: add `TASK_PROMPT` and `_open_task_ids()`; give `run_implement` a `prompt` parameter (default `IMPLEMENT_PROMPT`); add `run_per_task()` (IDs read once, skip ones already ticked, `checkpointer.finish(<ID>)` after each session, stop when a session leaves its task open); in `run()`, use it only without feedback, with one task file and an ID on every open task, inside the existing seat-outcome `try`
+- [X] T036 Tests in tests/test_swe_agent_seat.py: one session per open task in order, each prompt naming its task; a checkpoint per task when the model never commits; force-after-1-commit stops after `checkpoint: T001` and T002's session never starts; a seat outcome in the second session pushes `checkpoint: T001` and exits 75/77; the feedback retry uses one `/speckit-implement` session even with open tasks; predecessor `[X]` tasks get no session; a task ticked ahead is skipped; a session that leaves its task open ends the loop with its edits saved; make `_scripted` run its steps in the first session only
+- [X] T037 Run `py-codereviewer` on the F7-a diff; fix confirmed findings (at most two rounds each); update harness/swe-agent/SKILL.md and the CLAUDE.md swe-agent row
+- [ ] T038 Commit, rebuild the `swe-agent-sandbox` template, and verify the sha256 of `/app/agent.py` and `/app/seat_guard.py` in a credential-less sandbox
+- [ ] T039 [US2] V5 run 4 (`v5-seat-handoff-run-4`, fixture branch `v5-seat-handoff-4`, pool `credential-pool-v5c`): check headroom, run, verify (closes T032), record "V5 re-run 4" in quickstart.md, then clean up (worker, pool workflow, `.git/info/exclude`) and re-run the full gate
+
+---
+
 ## Dependencies & Execution Order
 
 - Phase 1 → Phase 2 → Phases 3–8.
 - US1 (F1), US7 (F6) and US6 (F5) are prerequisites for US2. US3 (F2), US4 (F3) and US5 (F4) are independent of each other and of US2.
 - Phase 9 needs all code phases done. Phase 10 needs Phase 9 (the image is built from reviewed code).
+- Phase 11 (F7-a) reopens Phase 10: T032 closes with T039's run 4.
 - Within a story: implementation, then its tests (the hooks run both suites on every edit anyway).
 
 ## Parallel Opportunities

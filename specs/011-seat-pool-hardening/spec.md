@@ -32,7 +32,12 @@ The six design forks from the handoff prompt (F1–F6). The operator was away (b
 - Q: F5 — Fix the feedback-retry handoff gap, or document it? → A: fix it: the Build run receives its handoff index and skips the "made no new commit" check when it is above 0. The prompt's extra condition "and the branch is ahead of the original start" is dropped, because a successor has no original-start commit without threading one through the exhaustion details; the remaining narrow gap (predecessor pushed nothing *and* successor commits nothing) then surfaces at the Eval-Gate instead of as exit 1. *Agent-decided, to confirm.*
 - Q: F6 — How can the force hook not be routed around? → A: (b) a new setting `SEAT_GUARD_FORCE_EXHAUST_HANDOFF=N` forces whichever seat runs handoff N of the Build stage (possible because F5 delivers the handoff index); the 009 seat-name setting keeps working. Rejected: (a) query `seats()` first and force the seat that will be picked. *Agent-decided, to confirm.*
 
-### Open fork F7, raised by V5 run 3 (2026-10-10, **needs the operator's ruling**)
+### Session 2026-10-11
+
+- Q: Does the operator confirm F1–F6? → A: Yes, all six as recorded above. *Operator-confirmed, 2026-10-11.*
+- Q: F7 — How does a Build make the successor start at the next task when the model ticks several tasks in one edit? → A: (a) one model session per open task (FR-023–FR-026). *Operator-ruled, 2026-10-11.* Rejected: (b) change only the fixture or the scratch repo's implement skill; (c) accept the model's tick granularity.
+
+### Fork F7, raised by V5 run 3 (2026-10-10; ruled F7-a on 2026-10-11)
 
 F1(a) assumes the model ticks one task at a time. The live run shows it doesn't: in 009 run 2 and again in 011 run 3, the model implemented all three tasks and then marked them `[X]` in one edit. The harness saved that work (nothing was lost), but one tick event can only become one checkpoint. So "the successor starts at task 2" (User Story 2, SC-001) cannot be shown on this fixture with F1(a) alone.
 
@@ -221,6 +226,13 @@ The live test forces exhaustion on whichever seat runs a given handoff of the Bu
 **Secrecy (carried from 009)**
 
 - **FR-022**: No credential value may appear in workflow history, activity arguments or results, logs, exception messages, PR comments or the agent's output. New fields (reset times, handoff index, days left) carry no credential.
+
+**One session per task (F7-a)**
+
+- **FR-023**: A Build without Gate feedback, whose task list is one file and whose open tasks all carry a task ID, MUST run one model session per open task, in file order. Each session's prompt names that one task and its task file and tells the model to mark it done and stop.
+- **FR-024**: A task already marked done before its session starts (by a predecessor seat, or by the model ahead of time in an earlier session) MUST be skipped. When a session ends with its task still open, the Build MUST run no further task sessions.
+- **FR-025**: After each task session ends normally, the harness MUST commit any remaining edits, so the next session's seat outcome cannot lose them. One harness checkpointer, one usage reading and one forced-exhaustion commit count span all sessions of the run. A seat outcome in any session ends the run with the 009 push and exit code.
+- **FR-026**: A Gate-feedback retry, a task list with an open task that has no task ID, and a run with several task files MUST keep the single `/speckit-implement` session.
 
 ### Key Entities
 

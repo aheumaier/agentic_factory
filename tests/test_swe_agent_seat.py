@@ -9,6 +9,7 @@ test); git is real, against a local bare repo standing in for GitHub, so
 """
 import asyncio
 import json
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -364,8 +365,15 @@ def _tick(cwd: Path, *ids: str) -> None:
 
 def _scripted(*steps):
     """Each step is a callable(cwd) run before yielding one message, or a
-    message (e.g. a RateLimitEvent) yielded as-is."""
+    message (e.g. a RateLimitEvent) yielded as-is. The steps are the whole
+    Build: only the first session runs them, later ones (specs/011 F7-a's
+    per-task sessions) yield nothing."""
+    sessions: list = []
+
     async def fake(*, prompt, options=None):
+        sessions.append(prompt)
+        if len(sessions) > 1:
+            return
         cwd = Path(options.cwd)
         for step in steps:
             if callable(step):
@@ -402,11 +410,12 @@ def test_harness_checkpoints_each_tick_when_the_model_never_commits(origin, monk
     monkeypatch.setattr(swe_agent, "query", _scripted(
         lambda cwd: _edit(cwd, "a.py"), lambda cwd: _tick(cwd, "T001"),
         lambda cwd: _edit(cwd, "b.py"), lambda cwd: _tick(cwd, "T002"),
-        lambda cwd: _edit(cwd, "fixup.py"),  # after the last tick: end-of-run commit
+        lambda cwd: _edit(cwd, "fixup.py"),  # after the last tick: end-of-session commit
     ))
 
+    # One session (T001's) runs the whole script; T003's session does nothing.
     assert _main() == 0
-    assert subjects == ["checkpoint: T001", "checkpoint: T002", "checkpoint: end of run"]
+    assert subjects == ["checkpoint: T001", "checkpoint: T002", "checkpoint: end of T001"]
 
 
 def test_model_commit_is_recorded_not_duplicated(origin, monkeypatch):
@@ -618,5 +627,222 @@ def test_older_specs_ticked_ids_do_not_hide_this_features_ticks(origin, monkeypa
         lambda cwd: _edit(cwd, "b.py"),
     ))
 
+    # "end of run": several task files keep the single session (F7-a, FR-026).
     assert _main() == 0
     assert subjects == ["checkpoint: T001", "checkpoint: end of run"]
+
+
+# --- specs/011 F7-a: one model session per open task ---------------------------
+
+def _raise(error):
+    def step(cwd):
+        raise error
+    return step
+
+
+def _task_sessions(calls: list, script: dict | None = None):
+    """A model that does what each per-task prompt asks: edits <ID>.py and
+    ticks the task the prompt names, never commits. `script` maps a task ID
+    to the steps (as in _scripted) to run instead. Records every prompt."""
+    async def fake(*, prompt, options=None):
+        calls.append(prompt)
+        cwd = Path(options.cwd)
+        match = re.search(r"only task (T\d+)", prompt)
+        task = match.group(1) if match else None
+        if script is not None and task in script:
+            steps = script[task]
+        else:
+            steps = [lambda cwd: _edit(cwd, f"{task}.py"), lambda cwd: _tick(cwd, task)]
+        for step in steps:
+            if callable(step):
+                step(cwd)
+                yield "tool result"
+            else:
+                yield step
+    return fake
+
+
+def _named(calls: list) -> list:
+    """The task each session's prompt names (None: not a per-task prompt)."""
+    return [m.group(1) if (m := re.search(r"only task (T\d+)", p)) else None for p in calls]
+
+
+def test_one_session_per_open_task_in_order_with_a_checkpoint_each(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001", "T002", "T003"]
+    assert all("specs/001-x/tasks.md" in p and not p.startswith("/speckit-implement")
+               for p in calls)
+    # The model never commits: every task still gets its own checkpoint.
+    assert subjects == ["checkpoint: T001", "checkpoint: T002", "checkpoint: T003"]
+
+
+def test_forced_exhaustion_after_one_commit_never_starts_t002(origin, monkeypatch, capsys):
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    monkeypatch.setenv("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS", "1")
+    before = _origin_head(origin.bare)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls))
+
+    assert _main() == 75
+    assert _named(calls) == ["T001"]
+    assert _origin_subjects(origin.bare, before) == ["checkpoint: T001"]
+    assert _last_line(capsys)["seat_status"] == "exhausted"
+
+
+@pytest.mark.parametrize(("outcome", "code"), [
+    (_rejected(), 75),
+    (_raise(sdk.ResultError("auth", data={"api_error_status": 401, "result": "bad"})), 77),
+])
+def test_seat_outcome_in_a_later_session_pushes_earlier_tasks(
+    origin, monkeypatch, capsys, outcome, code,
+):
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    before = _origin_head(origin.bare)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T002": [lambda cwd: _edit(cwd, "half-done.py"), outcome],
+    }))
+
+    assert _main() == code
+    assert _named(calls) == ["T001", "T002"]
+    assert _origin_subjects(origin.bare, before) == ["checkpoint: T001"]
+    assert _last_line(capsys)["seat_status"] == ("exhausted" if code == 75 else "invalid")
+
+
+def test_feedback_retry_keeps_one_speckit_session_with_open_tasks(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    _stub_pr(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _fake_query(("commit", "fix"), calls=calls))
+
+    assert _main("coverage too low") == 0
+    assert len(calls) == 1
+    assert calls[0]["prompt"].startswith("/speckit-implement")
+    assert "coverage too low" in calls[0]["prompt"]
+
+
+def test_predecessor_done_tasks_get_no_session(origin, monkeypatch):
+    origin.seed(THREE_TASKS.replace("- [ ] T001", "- [X] T001"))
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls))
+
+    assert _main() == 0
+    assert _named(calls) == ["T002", "T003"]
+    assert subjects == ["checkpoint: T002", "checkpoint: T003"]
+
+
+def test_task_ticked_ahead_in_an_earlier_session_is_skipped(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T001": [lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001", "T002"))],
+    }))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001", "T003"]
+    assert subjects == ["checkpoint: T001 T002", "checkpoint: T003"]
+
+
+def test_session_that_leaves_its_task_open_ends_the_loop(origin, monkeypatch, capsys):
+    origin.seed(THREE_TASKS)
+    subjects = _capture_log(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T001": [lambda cwd: _edit(cwd, "a.py")],
+    }))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001"]
+    assert subjects == ["checkpoint: end of T001"]  # its edits are saved
+    assert "task T001 left open" in capsys.readouterr().err
+
+
+def test_tasks_md_removed_by_the_model_skips_the_rest_without_crashing(origin, monkeypatch):
+    origin.seed(THREE_TASKS)
+    _stub_pr(monkeypatch)
+    calls: list = []
+
+    def tick_then_remove(cwd):
+        _edit(cwd, "a.py")
+        _tick(cwd, "T001")
+        (cwd / "specs" / "001-x" / "tasks.md").unlink()
+
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {"T001": [tick_then_remove]}))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001"]
+
+
+def test_open_task_without_id_keeps_one_speckit_session(origin, monkeypatch):
+    origin.seed(THREE_TASKS + "- [ ] ship it\n")
+    _stub_pr(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _fake_query(("commit", "all"), calls=calls))
+
+    assert _main() == 0
+    assert len(calls) == 1
+    assert calls[0]["prompt"].startswith("/speckit-implement")
+
+
+def test_per_task_prompt_names_the_branch_named_tasks_md(origin, monkeypatch):
+    """Production layout: specs/<branch>/tasks.md, not the glob fallback."""
+    origin.seed("# old\n", {f"specs/{BRANCH}/tasks.md": THREE_TASKS.replace(
+        "- [ ] T002", "- [X] T002").replace("- [ ] T003", "- [X] T003")})
+    _stub_pr(monkeypatch)
+    calls: list = []
+
+    def tick_t001(cwd):
+        tasks = cwd / "specs" / BRANCH / "tasks.md"
+        tasks.write_text(tasks.read_text().replace("- [ ] T001", "- [X] T001"))
+        _edit(cwd, "a.py")
+
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {"T001": [tick_t001]}))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001"]
+    assert f"from specs/{BRANCH}/tasks.md" in calls[0]
+
+
+def test_one_usage_reading_spans_all_sessions(origin, monkeypatch, capsys):
+    origin.seed(THREE_TASKS)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+    _stub_pr(monkeypatch)
+    raw = {"unifiedWindows": {"seven_day": {"utilization": 0.4, "resetsAt": 1791831600}}}
+    event = sdk.RateLimitEvent(sdk.RateLimitInfo(status="allowed", resets_at=1791831600, raw=raw))
+    calls: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(calls, {
+        "T001": [event, lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001"))],
+    }))
+
+    assert _main() == 0
+    assert _named(calls) == ["T001", "T002", "T003"]
+    status = json.loads(capsys.readouterr().out.strip().splitlines()[-2])
+    assert status["utilization"] == 0.4  # read in session 1, reported after session 3
+
+
+def test_open_task_ids_none_when_an_open_task_has_no_id(tmp_path):
+    _tasks(tmp_path, "001-x", THREE_TASKS)
+    tasks_md = tmp_path / "specs" / "001-x" / "tasks.md"
+    assert swe_agent._open_task_ids(tasks_md) == ["T001", "T002", "T003"]
+    tasks_md.write_text(THREE_TASKS + "  - [ ] nested sub-step\n")
+    assert swe_agent._open_task_ids(tasks_md) is None
+    tasks_md.write_text("- [ ] T001a not a Spec Kit ID\n")
+    assert swe_agent._open_task_ids(tasks_md) is None
+
+
+def test_task_prompt_names_one_task_and_forbids_commit_and_push():
+    prompt = " ".join(swe_agent.TASK_PROMPT.format(
+        task="T002", tasks_md="specs/x/tasks.md").split())
+    assert prompt.startswith("Implement only task T002 from specs/x/tasks.md")
+    assert "mark T002 `[X]`" in prompt and "STOP" in prompt
+    assert "Do not commit" in prompt
+    assert "Do not run `git push`" in prompt

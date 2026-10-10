@@ -1,7 +1,8 @@
-"""SWE agent (§3.2) — implement-only. Runs GitHub Spec Kit's
-/speckit-implement against a feature branch whose spec/plan/tasks were
-already produced upstream (Spec/Intake, §3.1, done manually), then opens
-a PR. See SKILL.md for what's deliberately deferred this pass.
+"""SWE agent (§3.2) — implement-only. Implements a feature branch whose
+spec/plan/tasks were already produced upstream (Spec/Intake, §3.1, done
+manually) — one model session per open task (specs/011 F7-a), or one
+GitHub Spec Kit /speckit-implement session — then opens a PR. See SKILL.md
+for what's deliberately deferred this pass.
 """
 import asyncio
 import contextlib
@@ -50,6 +51,23 @@ to confirm the change works. Then commit your changes locally with \
 fully pass, in which case say why in the commit message; a human \
 reviews the result either way. When you are done, STOP: do not run \
 `git push` and do not open a pull request. A separate step outside \
+this conversation handles pushing and opening the PR."""
+
+# specs/011 F7-a: one session per open task, so a seat outcome cuts off at
+# most the task in progress even when the model would batch its ticks. Not
+# /speckit-implement: that skill works through the whole list. "Do not
+# commit": the force hook counts commits, so a model commit before the tick
+# would fire it with the task still open (research R10).
+TASK_PROMPT = """Implement only task {task} from {tasks_md}. First read \
+the spec.md and plan.md next to it (and any other design docs there) for \
+context. Tasks marked `[X]` are already done — an earlier run may have \
+been cut off (specs/009) — so do not redo them, and do not start any task \
+after {task}.
+
+When {task} is implemented, run this repo's existing tests/verification \
+for it, then mark {task} `[X]` in {tasks_md} and STOP. Do not commit: a \
+checkpoint commit is saved for you when the task is marked done. Do not \
+run `git push` and do not open a pull request. A separate step outside \
 this conversation handles pushing and opening the PR."""
 
 FEEDBACK_PROMPT_SUFFIX = """
@@ -180,7 +198,30 @@ def all_tasks_done(checkout: Path, branch: str | None = None) -> bool:
 
 
 _DONE_LINE_RE = re.compile(r"^\s*- \[[xX]\]\s*(.*)$", re.MULTILINE)
-_TASK_ID_RE = re.compile(r"T\d+")
+_OPEN_LINE_RE = re.compile(r"^\s*- \[ \]\s*(.*)$", re.MULTILINE)
+_TASK_ID_RE = re.compile(r"T\d+\b")  # "T001a" is no ID
+
+
+def _open_task_ids(tasks_md: Path) -> list[str] | None:
+    """Open task IDs of one tasks.md, in file order; None when an open line
+    has no ID — no task to name a session after (specs/011 F7-a)."""
+    ids = []
+    for text in _OPEN_LINE_RE.findall(tasks_md.read_text()):
+        match = _TASK_ID_RE.match(text)
+        if not match:
+            return None
+        ids.append(match.group(0))
+    return ids
+
+
+def _task_open(tasks_md: Path, task: str) -> bool:
+    """False too when tasks.md is gone (the model moved it): the remaining
+    tasks are skipped instead of crashing the run."""
+    try:
+        text = tasks_md.read_text()
+    except OSError:
+        return False
+    return re.search(rf"^\s*- \[ \]\s*{task}\b", text, re.MULTILINE) is not None
 
 
 def _done_task_keys(checkout: Path, branch: str | None) -> list[tuple[str, str]]:
@@ -236,11 +277,12 @@ class TaskCheckpointer:
         if self._commit("checkpoint: " + (" ".join(ids) or "tasks")):
             self.saved.update(new)
 
-    def finish(self) -> None:
-        """After a normal stream end: checkpoint new ticks, then commit any
-        edits made after the last one (verification fixes)."""
+    def finish(self, what: str = "run") -> None:
+        """After a normal stream end (of the run, or of one task's session):
+        checkpoint new ticks, then commit any edits made after the last one
+        (verification fixes) as `checkpoint: end of <what>`."""
         self()
-        self._commit("checkpoint: end of run")
+        self._commit(f"checkpoint: end of {what}")
 
     def _commit(self, message: str) -> bool:
         """Commit everything if the tree is dirty. True once nothing is left
@@ -299,14 +341,15 @@ async def run_implement(
     checkout: Path, feedback: str | None = None, usage: dict | None = None,
     force_check: Callable[[], bool] | None = None,
     on_message: Callable[[], None] | None = None,
+    prompt: str = IMPLEMENT_PROMPT,
 ) -> str:
-    """Run /speckit-implement. In seat mode the stream goes through
+    """Run one model session on `prompt` (/speckit-implement by default,
+    TASK_PROMPT per task — specs/011 F7-a). In seat mode the stream goes through
     seat_guard, which records last-seen usage into `usage` and raises
     SeatExhausted/SeatInvalid on a seat outcome (specs/009). `force_check`
     is seat_guard's test hook (SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS).
     `on_message` runs after every message — before seat_guard polls
     `force_check` for it, so the hook counts that message's checkpoint."""
-    prompt = IMPLEMENT_PROMPT
     if feedback:
         prompt += FEEDBACK_PROMPT_SUFFIX.format(feedback=feedback)
     seat_token = _seat_token()
@@ -331,6 +374,29 @@ async def run_implement(
                 # it finishes before seat_guard resumes and polls force_check.
                 await asyncio.to_thread(on_message)
     return "\n".join(transcript)
+
+
+async def run_per_task(
+    checkout: Path, tasks_md: Path, task_ids: list[str], usage: dict | None,
+    force_check: Callable[[], bool] | None, checkpointer: TaskCheckpointer,
+) -> None:
+    """One model session per open task, in file order (specs/011 F7-a). A
+    task ticked ahead in an earlier session is skipped. After each session
+    its leftover edits are committed, so the next session's seat outcome
+    can't lose them. A session that leaves its task open ends the loop: a
+    later task likely builds on it (research R10). Seat outcomes propagate."""
+    rel = tasks_md.relative_to(checkout)
+    for task in task_ids:
+        if not _task_open(tasks_md, task):
+            continue
+        await run_implement(
+            checkout, None, usage, force_check, checkpointer,
+            prompt=TASK_PROMPT.format(task=task, tasks_md=rel),
+        )
+        checkpointer.finish(task)
+        if _task_open(tasks_md, task):
+            print(f"task {task} left open, stopping the per-task loop", file=sys.stderr)
+            return
 
 
 def verify_left_main(checkout: Path, branch: str) -> None:
@@ -440,8 +506,16 @@ async def run(
         n = force_exhaust_after_commits()
         force_check = (lambda: commits_since(checkout, sha_before) >= n) if n is not None else None
         checkpointer = TaskCheckpointer(checkout, branch)
+        # specs/011 F7-a: per task, unless there is Gate feedback (about the
+        # whole change), an open task without an ID, or several task files
+        # (older specs' open boxes must not get sessions of their own).
+        files = _task_files(checkout, branch)
+        task_ids = _open_task_ids(files[0]) if feedback is None and len(files) == 1 else None
         try:
-            await run_implement(checkout, feedback, usage, force_check, checkpointer)
+            if task_ids:
+                await run_per_task(checkout, files[0], task_ids, usage, force_check, checkpointer)
+            else:
+                await run_implement(checkout, feedback, usage, force_check, checkpointer)
         except (SeatExhausted, SeatInvalid):
             checkpointer()  # a tick the last message made, before pushing
             checkpoint_push(checkout, branch, sha_before)

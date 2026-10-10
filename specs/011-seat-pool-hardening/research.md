@@ -107,3 +107,24 @@ A wait does not advance the handoff counter.
 - `seats()` adds `expires_in_days`, computed from `workflow.now().date()`.
 
 **Alternative.** (b) A PR or issue comment as well. Rejected: no natural PR exists at boot. Teams notices belong to docs/80.
+
+## R10: One model session per open task (F7-a, operator-ruled 2026-10-11)
+
+**Decision.** In `run()`, when there is no Gate feedback, the task list is one file, and every open task has a `T\d+` ID, the harness runs one `query()` per open task, in file order (`run_per_task`). The list of open IDs is read once. Before each session the harness checks again, and it skips a task the model already ticked in an earlier session. The per-task prompt (`TASK_PROMPT`) names the task and its checkout-relative `tasks.md` path. It does not start with `/speckit-implement`: that skill works through the whole list. The prompt says to read the spec and plan, implement only that task, verify it, mark it `[X]` and stop, and **not to commit**.
+
+**Why "do not commit".** The forced-exhaustion hook counts commits. If the model commits its code *before* the tick, "exhaust after 1 commit" fires with the task still open, and the successor redoes it. When only the harness commits, the first commit is always `checkpoint: T001`. A model commit is still harmless (the checkpointer records a clean tree).
+
+**Between sessions.** After each session the checkpointer runs `finish(<ID>)`. It saves a tick from the last message and commits leftover edits as `checkpoint: end of <ID>`, so a seat outcome in the next session cannot lose them. When a session ends with its task still open, the loop stops, with a note on stderr: a later task likely builds on it, and the seat should not pay for N stuck sessions. The usual end-of-run steps follow (the new-commit check, push, PR).
+
+**Shared state.** One `TaskCheckpointer`, one `usage` dict, one `sha_before` and one `force_check` span all sessions. So the force count is cumulative, and the final `seat_status` line carries the last reading. One `try/except (SeatExhausted, SeatInvalid)` around the loop keeps the 009 push and exit 75/77.
+
+**Where the single session stays.**
+- A Gate-feedback retry: the feedback is about the whole change, and every task is already `[X]`.
+- An open task without an ID: there is nothing to name.
+- Several task files (the `specs/*/tasks.md` fallback): older specs' open boxes must not get sessions of their own.
+
+**Cost.** N CLI sessions per Build instead of 1. Each session re-reads the spec and plan, so seat usage per Build is higher, and there is no shared context between tasks. The operator accepted this with the ruling. All N sessions also share the activity's one sandbox command timeout (`_COMMAND_TIMEOUT_SECONDS`, 3300 s), and a timeout kills the sandbox before its local checkpoints are pushed. That risk existed before (009 research R8), but N sessions make it more likely on long task lists.
+
+**Alternatives.**
+- (b) Change only the fixture or the scratch repo's implement skill. Rejected: it is unreliable and proves nothing about production runs.
+- (c) Accept the model's tick granularity. Rejected: SC-001 would then hold only for models that tick per task.

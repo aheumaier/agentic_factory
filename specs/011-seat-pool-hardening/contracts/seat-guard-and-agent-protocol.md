@@ -26,6 +26,8 @@ Extends `specs/009-credential-pool-handoff/contracts/seat-guard-and-agent-protoc
 - The commit uses the repo's git identity, or `swe-agent <swe-agent@users.noreply.github.com>` when none is configured.
 - The force hook's commit count includes harness checkpoints, and it is polled after the checkpoint for the same message.
 
+**One session per task (F7-a, R10):** a Build without feedback, whose task list is one file with an ID on every open task, runs one model session per open task, in file order. The prompt is `TASK_PROMPT` (not `/speckit-implement`): implement only `<ID>` from `<tasks.md>`, mark it `[X]`, stop, do not commit. A task ticked before its session is skipped. A session that leaves its task open ends the loop. After each session, `finish(<ID>)` commits leftovers as `checkpoint: end of <ID>`. The checkpointer, `usage`, the force count and the seat-outcome handling span all sessions. A feedback retry, an open task without an ID, and several task files keep the single `/speckit-implement` session.
+
 **Resume behavior:** as in 009, plus `verify_new_commit` is skipped when `SEAT_HANDOFF_INDEX > 0` **and** no task is left open. This closes 009's "known gap". A successor with open tasks and no commit still exits 1. In the remaining case, where no one committed on a feedback retry, the Build reaches the PR step, and today's Eval-Gate does not check the diff (research R6).
 
 `usage_from_rate_limit_info` pairs: whenever a later event carries a utilization, `utilization_resets_at` is replaced too, even with `None`. A reading never keeps an older reading's reset time.
