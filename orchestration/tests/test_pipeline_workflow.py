@@ -33,6 +33,8 @@ from activities import (
 from workflows.credential_pool import CredentialPoolWorkflow
 from workflows.pipeline_workflow import AgentPipelineWorkflow
 
+pytestmark = pytest.mark.temporal
+
 TASK_QUEUE = "agent-factory-pipeline-test"
 BUILD_READING_RESETS_AT = "2099-01-01T05:00:00+00:00"  # specs/011 F2
 REPO = "owner/repo"

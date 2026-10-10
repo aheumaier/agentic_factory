@@ -81,6 +81,8 @@ from webhook_bridge import temporal_client  # noqa: E402
 from webhook_bridge.server import BridgeApp  # noqa: E402
 from webhook_bridge.tests._pipeline_workflow_stub import AgentPipelineWorkflow  # noqa: E402
 
+pytestmark = pytest.mark.temporal
+
 SECRET = "s3cr3t"
 REPO = "owner/repo"
 

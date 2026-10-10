@@ -23,6 +23,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# Fail (not hang) a stuck Temporal test: the .claude/hooks/py-check.sh gate
-# runs this suite on every .py edit.
+# Fail (not hang) a stuck Temporal test: the .claude/hooks/py-check.sh Stop
+# gate and policy.sh's AF-COMMIT run this suite.
 timeout = 60
+markers = ["temporal: needs a live Temporal server at localhost:7233; skipped via _connect_or_skip when unreachable"]

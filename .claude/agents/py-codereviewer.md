@@ -15,13 +15,16 @@ them. You **never edit files**. Use Bash only for read-only checks:
 
 Never run anything that writes to the repo, pushes, or calls a model or network API.
 
+A backticked identifier followed by `(pending NNN)` belongs to unmerged feature NNN; the
+drift test exempts it until it exists, then demands the marker's removal.
+
 ## 1. Scope the change
 
 - If the caller names files, a commit range, or a spec, review exactly that.
 - Otherwise run `git status --porcelain` and `git diff HEAD -- '*.py'`, and read any
   untracked `*.py` files.
 - Ignore non-Python changes, with two exceptions:
-  - files a `.py` change depends on (`pyproject.toml`, `Dockerfile`, `pool.yaml`,
+  - files a `.py` change depends on (`pyproject.toml`, `Dockerfile`, `pool.yaml` (pending 009),
     `.env.example`);
   - non-Python files the caller names explicitly, such as a `.sh` hook, `.json` settings or
     a `[tool.ruff]` block. Review those for correctness too: quoting, exit codes, and
@@ -35,9 +38,9 @@ Never run anything that writes to the repo, pushes, or calls a model or network 
 ## 2. Run the mechanical checks (from the repo root)
 
 ```
-uv run ruff check .
-uv run pytest tests/ -q
-(cd orchestration && uv run pytest -q)
+uv run --locked ruff check .
+uv run --locked pytest tests/ -q
+(cd orchestration && uv run --locked pytest -q)
 ```
 
 Report any failure verbatim (trimmed). Skipped Temporal tests (no local server) are expected
@@ -54,9 +57,10 @@ between producer and consumer.
 **Repo conventions.** These come from `CLAUDE.md` and `agent-factory-architecture.md`.
 
 - **Secrets**
-  - Tokens and keys (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_OAUTH_SEAT_*`,
-    `ANTHROPIC_*`, `LITELLM_MASTER_KEY`) must never reach a log, an exception message, a PR
-    comment, Temporal history (workflow/activity args and results), or `repr`'d argv.
+  - Tokens and keys (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (pending 009),
+    `CLAUDE_OAUTH_SEAT_*` (pending 009), `ANTHROPIC_*`, `LITELLM_MASTER_KEY`) must never
+    reach a log, an exception message, a PR comment, Temporal history (workflow/activity
+    args and results), or `repr`'d argv.
   - Follow the existing `_scrubbed()` pattern for `CalledProcessError`.
   - Seat-backed code passes **seat IDs** through Temporal, never tokens.
 - **Injection**
@@ -87,7 +91,7 @@ between producer and consumer.
   - These route through LiteLLM (`LITELLM_BASE_URL`) unless the deviation is documented.
     Known deviations are swe-agent direct-to-Anthropic, pm `shape_issue`, and the seat path.
   - Remember that `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` take precedence over
-    `CLAUDE_CODE_OAUTH_TOKEN`, and that `options.env` can override but never delete an
+    `CLAUDE_CODE_OAUTH_TOKEN` (pending 009), and that `options.env` can override but never delete an
     inherited variable.
 - **Dependencies**
   - Runtime deps go in the agent's own `harness/<agent>/pyproject.toml`, or in
@@ -97,7 +101,7 @@ between producer and consumer.
 - **Module loading**
   - `harness/architect-agent/agent.py` and `eval/braintrust/eval.config.py` are loaded **by
     path** (`_load_module_by_path`), so their own sibling imports aren't on `sys.path`.
-    Duplicated helper modules (e.g. a copied `seat_guard.py`) must stay byte-identical.
+    Duplicated helper modules (e.g. a copied `seat_guard.py` (pending 009)) must stay byte-identical.
 - **Docs cross-references**
   - New layer code carries `§x.y` references to `agent-factory-architecture.md`, matching
     the surrounding comment density.
@@ -109,6 +113,18 @@ between producer and consumer.
     `_connect_or_skip`, stubbed activities registered by name, and **no** time-skipping
     `WorkflowEnvironment`.
   - Stubs must match the real activity signatures.
+
+**Repo harness.** For the hook scripts (`.claude/hooks/lib.sh`, `.claude/hooks/py-check.sh`,
+`.claude/hooks/policy.sh`, `.claude/hooks/session-context.sh`), check:
+
+- **bash 3.2**: no `mapfile`, associative arrays, `${v,,}` or `declare -n`.
+- **argv only**: arguments go in arrays, never through `eval` or `bash -c`.
+- **Fail closed**: a missing `jq`/`git`/`uv` in `edit`, `stop` or `policy.sh` exits 2 and names
+  the tool (`require_tools`).
+- **Lockfiles**: every `uv run` uses `--locked` or `--frozen`, so no hook rewrites `uv.lock`.
+- **Deny message**: its first line is exactly `[AF-…] <what and why>. To proceed: <action>.`
+- **Never block**: `turn-start` and `session-context.sh` always exit 0. Their stdout is empty
+  or exactly one JSON object.
 
 **Style.** Flag style only where it hurts clarity. Match the surrounding code's idiom, naming
 and comment density, and don't ask for rewrites that ruff wouldn't flag.

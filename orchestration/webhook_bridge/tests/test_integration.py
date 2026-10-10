@@ -15,6 +15,8 @@ from temporalio.worker import Worker
 
 from webhook_bridge import temporal_client
 
+pytestmark = pytest.mark.temporal
+
 TASK_QUEUE = "webhook-bridge-integration-test"
 
 

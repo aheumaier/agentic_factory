@@ -1,5 +1,58 @@
 {
+  "env": {
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "150000"
+  },
+  "permissions": {
+    "deny": [
+      "Read(/.env)",
+      "Read(/.env.braintrust)"
+    ],
+    "ask": [
+      "Edit(/registry/agents/*/manifest.yaml)",
+      "Edit(/registry/agents/*/versions/**)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.claude/settings.local.json)",
+      "Edit(/.claude/hooks/**)"
+    ]
+  },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-context.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh turn-start",
+            "timeout": 30,
+            "statusMessage": "turn snapshot"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/policy.sh",
+            "timeout": 300,
+            "statusMessage": "repo policy (AF-*)"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
@@ -7,8 +60,8 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh edit",
-            "timeout": 300,
-            "statusMessage": "ruff + pytest"
+            "timeout": 60,
+            "statusMessage": "ruff (edited file)"
           }
         ]
       }
@@ -20,7 +73,7 @@
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh stop",
             "timeout": 300,
-            "statusMessage": "ruff + pytest (end of turn)"
+            "statusMessage": "ruff + pytest (this turn's changes)"
           }
         ]
       }

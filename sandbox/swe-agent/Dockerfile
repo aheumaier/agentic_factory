@@ -4,7 +4,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates gnupg \
+        git curl ca-certificates gnupg jq \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -12,6 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# jq + uv: this repo's own Claude Code hooks (.claude/hooks/) need both and
+# fail closed without them. swe-agent loads project settings, so those hooks
+# run here whenever the target repo is agentic_factory itself (specs/010
+# FR-014). uv is pinned to the version the operator's host runs.
+COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /bin/
 
 WORKDIR /app
 # Mirrors the dependencies in harness/swe-agent/pyproject.toml; the project
