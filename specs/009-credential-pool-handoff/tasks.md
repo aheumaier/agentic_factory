@@ -11,6 +11,8 @@ description: "Task list for 009-credential-pool-handoff"
 **Tests**: These are included. The spec's success criteria and quickstart V1–V3 call for them, and `.claude/hooks/py-check.sh` enforces ruff and both pytest suites on every `.py` edit.
 - Root suite: `uv run pytest tests/`
 - Orchestration suite: `cd orchestration && uv run pytest`. Its Temporal tests use the real `localhost:7233` with `_connect_or_skip` (research R9).
+- **Every test that starts a `CredentialPoolWorkflow` MUST `terminate()` its handle in a `finally`**, the same pattern as `test_e2e_pipeline_gate.py`. The pool never completes, so a missed terminate leaks a live workflow onto the dev server for every test run.
+- **Order within a task:** the PostToolUse hook runs both suites with `-x` on every `.py` save. Write the implementation first and then its test, or expect exit-2 feedback while a test exists before its code.
 
 **Organization**: Tasks are grouped by user story. Run `py-codereviewer` at the end of every phase, before its commit.
 
@@ -54,7 +56,8 @@ description: "Task list for 009-credential-pool-handoff"
   - `acquire_seat_activity` returns `{"seat_id", "earliest_reset"}`, filling `earliest_reset` from the `seats()` query only when `seat_id` is None.
 - [ ] T008 Change `orchestration/worker.py`:
   - register `CredentialPoolWorkflow` and the three activities;
-  - before `worker.run()`, start the pool with `client.start_workflow(CredentialPoolWorkflow.run, load_pool(), id=pool_id, task_queue=TASK_QUEUE, id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)`.
+  - before `worker.run()`, start the pool with `client.start_workflow(CredentialPoolWorkflow.run, load_pool(), id=pool_id, task_queue=TASK_QUEUE, id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)`;
+  - call `load_dotenv(<repo>/.env)` explicitly at the top of `main()`. `make worker` loads no `.env`, and today the seat token only reaches `os.environ` as a side effect of `activities.py` loading the architect agent.
 - [ ] T009 Add pool-workflow tests against local Temporal, with `_connect_or_skip` and a per-test pool ID from `uuid`, in `orchestration/tests/test_credential_pool.py`:
   - acquire→release updates `last_utilization`;
   - a repeated acquire with the same `lease_key` returns the same seat;
@@ -66,7 +69,7 @@ description: "Task list for 009-credential-pool-handoff"
 - [ ] T010 [P] Implement the canonical `harness/swe-agent/seat_guard.py` per contracts/seat-guard-and-agent-protocol.md:
   - `SeatExhausted`/`SeatInvalid`, subclassing `Exception` directly;
   - `seat_options_env`, `usage_from_rate_limit_info` (max over `raw["unifiedWindows"]`, fallback, research R2), `classify_result_error` (research R3 rules, in order);
-  - `guarded_query(prompt, options, usage)` wrapping `claude_agent_sdk.query`;
+  - `guarded_query(prompt, options, usage)` wrapping `claude_agent_sdk.query` inside `contextlib.aclosing(...)`, so that raising mid-stream (a rejected event, or task cancellation) tears down the CLI subprocess and stops hitting an exhausted seat;
   - an optional force hook: `SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS` plus a `force_check()` callable the caller passes in, so the guard stays git-agnostic.
 
   Never log the token.
@@ -98,14 +101,14 @@ description: "Task list for 009-credential-pool-handoff"
 **Independent Test**: one-seat pool → one Build → success, seat free again with `last_utilization` recorded, no token in history or logs (SC-001, SC-006, SC-007).
 
 - [ ] T014 [US1] In `harness/swe-agent/agent.py`:
-  - `build_options` merges `seat_options_env(os.environ["CLAUDE_CODE_OAUTH_TOKEN"])` into `options.env`;
-  - `run_implement` iterates `guarded_query(…, usage)` and returns the transcript and `usage`;
+  - seat mode is **conditional**. When `CLAUDE_CODE_OAUTH_TOKEN` is set, `build_options` merges `seat_options_env(token)` into `options.env` and `run_implement` iterates `guarded_query(…, usage)`. When it is unset (the GitHub-comment path via `swe-agent-build.yml`, which still passes an API key), options and the plain `query()` stay exactly as today, the guard is off, and an API-key 429 never becomes exit 75 (spec Out of Scope);
+  - `run_implement` returns the transcript and `usage`;
   - on success, `__main__` prints `{"seat_status":"ok","utilization":…,"rate_limit_type":…}` as JSON right before the PR URL, which stays the last line.
 - [ ] T015 [US1] Add `COPY seat_guard.py /app/` to `sandbox/swe-agent/Dockerfile`, next to the `agent.py` copy.
 - [ ] T016 [US1] Change `run_swe_agent_activity` in `orchestration/activities.py`:
   - new signature `(repo, branch, feedback, seat_id)`;
   - sandbox `envs={"CLAUDE_CODE_OAUTH_TOKEN": token_for(seat_id, load_pool()), "GH_TOKEN": …}`, with `ANTHROPIC_PLATFORM_API_KEY` removed;
-  - `_SANDBOX_TIMEOUT_SECONDS = 3300` and `sandbox.commands.run(…, timeout=_SANDBOX_TIMEOUT_SECONDS)` (research R8);
+  - `_COMMAND_TIMEOUT_SECONDS = 3300` for `sandbox.commands.run(…, timeout=…)`, and `_SANDBOX_TIMEOUT_SECONDS = 3500` for `AsyncSandbox.create`. That gives about 200 s of headroom so the sandbox can't expire during the push and PR tail, and both stay under the 60-min activity timeout (research R8);
   - a `_parse_seat_status(stdout)` helper;
   - return `{"pr_url", "seat_id", "utilization", "rate_limit_type"}`.
 
@@ -165,9 +168,10 @@ description: "Task list for 009-credential-pool-handoff"
   - a `SeatExhausted` raised from `run_implement` leads to push, the JSON line and exit 75;
   - `SeatInvalid` leads to exit 77;
   - a failed push leads to exit 1;
-  - the force hook triggers after N commits.
+  - the force hook triggers after N commits;
+  - **no-token branch:** with `CLAUDE_CODE_OAUTH_TOKEN` unset, options carry no seat env and the plain `query` is used.
 
-  Use `tests/conftest.py`'s path setup pattern for `harness/swe-agent`.
+  Load swe-agent's `agent.py` **by path under a distinct module name** with `tests/conftest.py`'s `_load_agent` (as `swe_agent`), never with `import agent`, which is already pm-agent in `sys.modules`. Put `harness/swe-agent` on `sys.path` first, or pre-load `seat_guard` by path, so its `import seat_guard` resolves.
 - [ ] T027 [P] [US2] Extend `orchestration/tests/test_seat_activities.py`: exit 75 → `SeatExhausted` with details; 77 → `SeatInvalid`; 1 → `RuntimeError`; the force hook is forwarded only for the matching seat.
 - [ ] T028 [US2] Add a handoff case to `orchestration/tests/test_pipeline_workflow.py`. Use a two-logical-seat test pool (`seat-a`, `seat-b`, both `token_env: CLAUDE_OAUTH_SEAT_A`, `max_concurrent: 1`). The Build stub raises `ApplicationError(type="SeatExhausted", non_retryable=True, details=["seat-a", None])` on the first call and succeeds on the second. Assert that:
   - the second call got `seat-b`;

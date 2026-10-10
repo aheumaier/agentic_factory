@@ -134,7 +134,7 @@ The 429 branch is unit-tested with a synthetic payload. Its real shape is checke
 
 **Decisions.**
 - Call `commands.run(..., timeout=_SANDBOX_TIMEOUT_SECONDS)`.
-- Raise `_SANDBOX_TIMEOUT_SECONDS` to 3300 s (55 min) and the activity's `start_to_close_timeout` to 60 min. The sandbox lifetime must be at least the command timeout, and both must be less than the activity timeout.
+- Set the command timeout to 3300 s (55 min), the sandbox lifetime `_SANDBOX_TIMEOUT_SECONDS` to 3500 s, and the activity's `start_to_close_timeout` to 60 min. The sandbox needs about 200 s of headroom over the command, so it can't expire during the push and PR tail, and both must be less than the activity timeout.
 - Catch `CommandExitException` and map exit codes:
   - **75** (`EX_TEMPFAIL`) means `SeatExhausted`;
   - **77** (`EX_NOPERM`) means `SeatInvalid`;

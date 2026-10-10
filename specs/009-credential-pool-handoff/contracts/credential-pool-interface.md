@@ -49,8 +49,8 @@ for handoff in range(MAX_SEAT_HANDOFFS + 1):
         result = execute_activity(activity, args + [got.seat_id], **opts)
     except ActivityError as e with e.cause.type in {"SeatExhausted","SeatInvalid"}:
         report_seat_failure_activity(seat, key, kind, resets_at); continue      # lease already removed by mark_*
-    except BaseException:
-        release_seat_activity(seat, key, None, None); raise                     # never strand a lease
+    except Exception:          # NOT BaseException: let asyncio.CancelledError (workflow cancel) propagate
+        release_seat_activity(seat, key, None, None); raise                     # never strand a lease; TTL covers cancel
     release_seat_activity(seat, key, result.get("utilization"), result.get("rate_limit_type"))
     return result
 raise ApplicationError(type="SeatHandoffsExhausted", details=[stage, MAX_SEAT_HANDOFFS])
