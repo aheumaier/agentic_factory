@@ -123,7 +123,7 @@ harness/architect-agent/
 ├── seat_guard.py               # NEW (byte-identical copy)
 └── agent.py                    # seat_token threading through option builders; guarded _model_text; TaskGroup fan-out
 
-sandbox/swe-agent/Dockerfile    # COPY seat_guard.py; pin SDK  (template rebuild: manual `e2b template build`)
+sandbox/swe-agent/Dockerfile    # COPY seat_guard.py; pin SDK  (template rebuild: manual `e2b template create swe-agent-sandbox -p . -d sandbox/swe-agent/Dockerfile`)
 tests/
 ├── test_seat_guard.py          # NEW: classification, usage parsing, options env, copies identical
 ├── test_swe_agent_seat.py      # NEW: exit protocol, all-done shortcut, force-exhaust hook

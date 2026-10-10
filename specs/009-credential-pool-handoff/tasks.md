@@ -267,13 +267,14 @@ description: "Task list for 009-credential-pool-handoff"
   Stage only these hunks: CLAUDE.md has unrelated uncommitted operator edits.
 - [X] T040 [P] Update `agent-factory-architecture.md` §3.4: the seat-path deviation, why LiteLLM can't pool OAuth tokens (R4), the LiteLLM pass-through follow-up, and the single-operator usage constraint.
 - [X] T041 [P] Update `harness/swe-agent/SKILL.md` and `harness/architect-agent/SKILL.md`: the seat-backed runtime, the exit codes 75/77 and the resume behavior, the usage constraint, and "Known gaps" (the GitHub-comment path still uses the API key; no durable sleep-until-reset; no expiry alert).
-- [ ] T042 Rebuild the E2B template (`cd sandbox/swe-agent && e2b template build`). This is a **manual** step that needs the operator's E2B credentials, so record the outcome in this task when it is run.
+- [X] T042 Rebuild the E2B template (`cd sandbox/swe-agent && e2b template build`). This is a **manual** step that needs the operator's E2B credentials, so record the outcome in this task when it is run.
 
-  *Pending (2026-10-10):* `E2B_API_KEY` is empty in `.env` and the `e2b` CLI isn't installed on this host. Until the template is rebuilt, the sandbox runs the old image without `seat_guard.py`, so the seat path can't run live.
+  *Done (2026-10-10):* E2B CLI 2.21.2 has no `template build`. The equivalent, run from the repo root, is `e2b template create swe-agent-sandbox -p . -d sandbox/swe-agent/Dockerfile --cpu-count 2 --memory-mb 1024`, which rebuilt the existing template `hsba4h3huewux87jl2sd` in place. Verified in a credential-less sandbox: the sha256 of `/app/agent.py` and `/app/seat_guard.py` matches commit `8e2cbfb`, `claude-agent-sdk` is 0.2.165, and `seat_guard` imports.
+
 - [X] T043 Run quickstart V1–V3 locally (`make up`, then both suites with no skips) and V4 against seat-a. Record the results in `specs/009-credential-pool-handoff/quickstart.md` under a "Results" heading.
 - [ ] T044 Run quickstart V5 (live end-to-end with forced handoff and the secrecy grep) once `E2B_API_KEY`, `GH_TOKEN` and a disposable target repo are available. Until then, record it as pending with the missing prerequisites listed.
 
-  *Pending (2026-10-10):* missing `E2B_API_KEY`, `GH_TOKEN`, a disposable target repo, and the T042 template rebuild.
+  *Pending (2026-10-10):* T042 is done and `E2B_API_KEY` is set. Still missing: `GH_TOKEN` (or the SWE-agent GitHub App credentials that mint it) and a disposable target repo with a pre-planned `specs/<branch>/tasks.md` branch.
 - [X] T045 Run `py-codereviewer` over the full 009 diff and resolve the findings before the PR.
 
 ---
