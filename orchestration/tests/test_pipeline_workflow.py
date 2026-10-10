@@ -676,3 +676,29 @@ async def test_cancel_during_seat_backed_architect_stage_cancels_the_run():
     assert isinstance(exc.value.cause, CancelledError)
     assert len([c for c in calls if c[0] == "architect_stage_activity"]) == 1
     assert table["seat-a"]["active_leases"] == 0
+
+
+async def test_cancel_during_seat_release_is_not_swallowed():
+    """A cancel landing while the lease release runs must not be re-typed as
+    a pool failure and swallowed by the best-effort release (the run would
+    otherwise carry on to Build)."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    releasing = asyncio.Event()
+
+    @activity.defn(name="release_seat_activity")
+    async def blocking_release(*args) -> None:
+        releasing.set()
+        await asyncio.sleep(3600)
+
+    activities = _stub_activities(calls, [_plan_result()])
+    async with _harness(client, run_id, activities, seat_overrides=[blocking_release]):
+        handle = await _start(client, run_id)
+        await asyncio.wait_for(releasing.wait(), 10)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError) as exc:
+            await handle.result()
+
+    assert isinstance(exc.value.cause, CancelledError)
+    assert not _build_calls(calls)

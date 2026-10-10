@@ -73,6 +73,6 @@ Run on 2026-10-10 on branch `009-credential-pool-handoff`, with local Temporal u
 | Step | Result |
 |---|---|
 | V1 unit tests | `uv run pytest tests/ -q`: **108 passed**. `ruff check .` is clean. |
-| V2 + V3 (Temporal) | `cd orchestration && uv run pytest -q`: **134 passed, 0 skipped**. This covers the pool workflow; Build and architect handoff; pool exhausted; handoff budget; pool unavailable; a failed release; and a cancel during a seat-backed stage. |
+| V2 + V3 (Temporal) | `cd orchestration && uv run pytest -q`: **135 passed, 0 skipped**. This covers the pool workflow; Build and architect handoff; pool exhausted; handoff budget; pool unavailable; a failed release; and a cancel during a seat-backed stage or during its lease release. |
 | V4 live seat smoke | `scripts/seat_smoke.py` against seat-a, with a poisoned parent `ANTHROPIC_API_KEY`/`BASE_URL`: **PASS**. `result='OK'`, `utilization=0.65` (`five_hour`). |
 | V5 live end-to-end | **Pending.** Needs `E2B_API_KEY`, `GH_TOKEN`, a disposable target repo, and the T042 E2B template rebuild with `seat_guard.py`. |
