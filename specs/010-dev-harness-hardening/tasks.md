@@ -452,6 +452,13 @@ re-parsing (FR-009).
     5. Rebuild the `swe-agent-sandbox` E2B template with the merge. Until then, `policy.sh` fails closed (no `jq`/`uv`) for any sandbox run that targets this repo. Pin `jq` too.
     6. Operator decision: AF-COMMIT denies the red commit that swe-agent's `IMPLEMENT_PROMPT` asks for ("commit even if verification doesn't pass"). Either record that as a known gap, or exempt the sandbox through an env marker.
     7. Operator ruling: settle AF-SECRET's code against the contract. Case-folding and the Grep `glob`/Glob `pattern` checks already ship in `policy.sh`.
+  - **Before-merge status, 2026-10-11 (rebased onto `origin/main` 40a2c40):**
+    1. Done. The feature commit was replayed first (as 7d005ba), so `specs/010-*` existed for AF-SPEC; 889785f followed as 6a11de4. Conflicts: CLAUDE.md keeps 010's rows plus main's 009/011 text and `seat_smoke.py` command; `orchestration/pyproject.toml` keeps main's `timeout = 60` next to the `temporal` marker. 889785f's `test_pipeline_workflow.py` half was dropped: main fixed the same signal race its own way (`_wait_plan_parked`, `_result`, `EXECUTION_TIMEOUT`). The Dockerfile replayed without conflict. Leftover: 7d005ba's message still says "Based on 889785f; must be rebased onto origin/main before merge". Rewording it needs a reset, which was denied in this session, so it is left for the operator.
+    2. Done. `--locked` passes for both pairs, so `uv lock` was not re-run and both lockfiles equal main's. The five `(pending 009)` markers are dropped; the drift test failed on them right after the rebase, as designed.
+    3. Done. CLAUDE.md: 009 and 011 merged, `specs/008-gate-decision-core/` (Draft) cited by path, 010 in flight. T019 is closed. The pyproject comment now names the Stop gate and AF-COMMIT.
+    4. Done. The module mixes pure and live tests, so the 18 `_running_pool` tests carry a per-test `@pytest.mark.temporal`, not a `pytestmark`.
+    5.–7. Open for the operator.
+    Gates: ruff clean; `tests/` 271 passed; `orchestration/` 167 passed; with `-m "not temporal"` 120 passed, 47 deselected. Local arm64 `docker build` of the sandbox image prints `jq-1.7` and `uv 0.10.0`; image removed afterwards.
   - **Deferred follow-ups** (the operator chose to record them all, with no further hook edits in this commit):
     - Gate overrun: the policy hook has a 300s timeout. A timeout is a non-blocking error, so a slow live-Temporal suite lets the commit through. Wrap the suites in a shorter inner timeout that denies on overrun.
     - Without `uv`, a turn that changed Python is blocked on every Stop retry: `require_tools` exits before the `stop_hook_active` guard.
@@ -462,7 +469,8 @@ re-parsing (FR-009).
     - No gate runs shellcheck. It reports only SC2034 (a false positive, `lib.sh:11-12`) and SC1091.
     - An unsourceable `lib.sh` makes `policy.sh` deny every tool call. Document the manual recovery, or allow edits under `.claude/hooks/**` in that case.
     - The D-ID corpus walks untracked and ignored files. Use `git ls-files -co --exclude-standard`.
-    - Add a test that the `temporal` mark set equals the modules that use `_connect_or_skip`.
+    - Add a test that every test reaching `_connect_or_skip` carries the `temporal` mark (per test, since `test_credential_pool.py` mixes pure and live tests).
+    - AF-SPEC denies edits during a `git rebase` conflict: HEAD is detached (no `NNN-` branch name), and `specs/NNN-*/tasks.md` may not exist yet mid-replay.
     - Docs-only edits don't trigger the drift test at Stop, so drift first fails at the next AF-COMMIT.
     - Verify that ROOT follows a mid-session `EnterWorktree`; until then, recommend `claude --worktree`.
     - AF-COMMIT misses `revert`, `cherry-pick`, `merge`, `am` and `rebase`.

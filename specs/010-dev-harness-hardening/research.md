@@ -154,7 +154,10 @@ to the three modules that use `_connect_or_skip`:
 `orchestration/webhook_bridge/tests/test_integration.py` and
 `orchestration/webhook_bridge/tests/test_e2e_pipeline_gate.py`. The gates don't
 filter on the marker, so today's run-if-reachable/skip-otherwise behaviour is kept,
-but `-m "not temporal"` and `-m temporal` now work.
+but `-m "not temporal"` and `-m temporal` now work. After the rebase onto main
+(2026-10-11), 009's `orchestration/tests/test_credential_pool.py` is a fourth live
+module. It mixes pure and live tests, so only its 18 `_running_pool` tests carry
+`@pytest.mark.temporal`, one by one.
 
 **Rationale**: these are the only modules with a live-server dependency *[measured:
 10 skipped = 7 + 1 + 2]*. A module-level mark is the smallest change and keeps

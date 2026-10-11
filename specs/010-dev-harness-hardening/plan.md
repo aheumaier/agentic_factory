@@ -144,6 +144,7 @@ tests/
 orchestration/
 ├── pyproject.toml                # + [tool.pytest.ini_options] markers = ["temporal: …"]
 ├── tests/test_pipeline_workflow.py                  # + pytestmark = pytest.mark.temporal
+├── tests/test_credential_pool.py                    # + @pytest.mark.temporal per live test (added after the rebase onto main; the module also has pure tests)
 └── webhook_bridge/tests/{test_integration,test_e2e_pipeline_gate}.py   # + pytestmark
 
 CLAUDE.md                         # FR-011, FR-023(a–d), FR-024 harness section + rule catalogue, FR-030 "Context budget" section

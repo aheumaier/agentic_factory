@@ -24,7 +24,7 @@ drift test exempts it until it exists, then demands the marker's removal.
 - Otherwise run `git status --porcelain` and `git diff HEAD -- '*.py'`, and read any
   untracked `*.py` files.
 - Ignore non-Python changes, with two exceptions:
-  - files a `.py` change depends on (`pyproject.toml`, `Dockerfile`, `pool.yaml` (pending 009),
+  - files a `.py` change depends on (`pyproject.toml`, `Dockerfile`, `pool.yaml`,
     `.env.example`);
   - non-Python files the caller names explicitly, such as a `.sh` hook, `.json` settings or
     a `[tool.ruff]` block. Review those for correctness too: quoting, exit codes, and
@@ -57,8 +57,8 @@ between producer and consumer.
 **Repo conventions.** These come from `CLAUDE.md` and `agent-factory-architecture.md`.
 
 - **Secrets**
-  - Tokens and keys (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (pending 009),
-    `CLAUDE_OAUTH_SEAT_*` (pending 009), `ANTHROPIC_*`, `LITELLM_MASTER_KEY`) must never
+  - Tokens and keys (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
+    `CLAUDE_OAUTH_SEAT_*`, `ANTHROPIC_*`, `LITELLM_MASTER_KEY`) must never
     reach a log, an exception message, a PR comment, Temporal history (workflow/activity
     args and results), or `repr`'d argv.
   - Follow the existing `_scrubbed()` pattern for `CalledProcessError`.
@@ -91,7 +91,7 @@ between producer and consumer.
   - These route through LiteLLM (`LITELLM_BASE_URL`) unless the deviation is documented.
     Known deviations are swe-agent direct-to-Anthropic, pm `shape_issue`, and the seat path.
   - Remember that `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` take precedence over
-    `CLAUDE_CODE_OAUTH_TOKEN` (pending 009), and that `options.env` can override but never delete an
+    `CLAUDE_CODE_OAUTH_TOKEN`, and that `options.env` can override but never delete an
     inherited variable.
 - **Dependencies**
   - Runtime deps go in the agent's own `harness/<agent>/pyproject.toml`, or in
@@ -101,7 +101,7 @@ between producer and consumer.
 - **Module loading**
   - `harness/architect-agent/agent.py` and `eval/braintrust/eval.config.py` are loaded **by
     path** (`_load_module_by_path`), so their own sibling imports aren't on `sys.path`.
-    Duplicated helper modules (e.g. a copied `seat_guard.py` (pending 009)) must stay byte-identical.
+    Duplicated helper modules (e.g. a copied `seat_guard.py`) must stay byte-identical.
 - **Docs cross-references**
   - New layer code carries `§x.y` references to `agent-factory-architecture.md`, matching
     the surrounding comment density.

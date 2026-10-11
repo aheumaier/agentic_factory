@@ -214,10 +214,10 @@ Service ports (docker-compose): Temporal 7233, Temporal UI 8080, Langfuse
   exhaustion still raises a bare `ApplicationError` rather than the
   escalation pair); `006`-`007` are spec.md-only today. Don't assume any
   of their remaining described activities, signals, or registry entries
-  exist until their own PR lands. Also in flight, outside that product
-  sequence: feature 009 (credential-pool handoff, branch
-  `009-credential-pool-handoff`, unmerged) and feature 010 (dev-harness
-  hardening).
+  exist until their own PR lands. Outside that product sequence: features
+  009 (credential-pool handoff) and 011 (seat-pool hardening) are merged;
+  `specs/008-gate-decision-core/` is Draft (spec only); feature 010
+  (dev-harness hardening) is in flight.
 - **`swe-agent` has two independent trigger paths that diverge in
   capability**: a Temporal `AgentPipelineWorkflow` run gets the full
   Build→Gate→Register loop; the GitHub-comment path

@@ -221,6 +221,7 @@ async def _running_pool(pool: dict):
                 await handle.terminate()
 
 
+@pytest.mark.temporal
 async def test_pool_acquire_release_updates_utilization(two):
     async with _running_pool(two) as pool:
         seat = await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
@@ -237,6 +238,7 @@ async def test_pool_acquire_release_updates_utilization(two):
         assert table["seat-a"]["last_rate_limit_type"] == "seven_day"
 
 
+@pytest.mark.temporal
 async def test_pool_acquire_is_idempotent_per_lease_key(two):
     async with _running_pool(two) as pool:
         first = await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
@@ -246,6 +248,7 @@ async def test_pool_acquire_is_idempotent_per_lease_key(two):
         assert table["seat-a"]["active_leases"] == 1
 
 
+@pytest.mark.temporal
 async def test_pool_mark_exhausted_then_none_for_sole_seat(two):
     async with _running_pool(two) as pool:
         seat = await pool.execute_update(
@@ -263,6 +266,7 @@ async def test_pool_mark_exhausted_then_none_for_sole_seat(two):
         ) is None
 
 
+@pytest.mark.temporal
 async def test_pool_mark_exhausted_without_reset_defaults_one_hour(two):
     async with _running_pool(two) as pool:
         await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
@@ -273,6 +277,7 @@ async def test_pool_mark_exhausted_without_reset_defaults_one_hour(two):
         assert timedelta(minutes=55) < until - datetime.now(UTC) <= timedelta(hours=1)
 
 
+@pytest.mark.temporal
 async def test_pool_mark_invalid_and_reset_seat(two):
     async with _running_pool(two) as pool:
         await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
@@ -289,6 +294,7 @@ async def test_pool_mark_invalid_and_reset_seat(two):
         assert table["seat-a"]["exhausted_until"] is None
 
 
+@pytest.mark.temporal
 async def test_pool_unknown_seat_updates_are_noops(two):
     async with _running_pool(two) as pool:
         await pool.execute_update(CredentialPoolWorkflow.release, args=["seat-z", "k", 0.5, None])
@@ -296,6 +302,7 @@ async def test_pool_unknown_seat_updates_are_noops(two):
         assert set(await pool.query(CredentialPoolWorkflow.seats)) == {"seat-a", "seat-b"}
 
 
+@pytest.mark.temporal
 async def test_pool_seats_query_never_exposes_token_env(two):
     async with _running_pool(two) as pool:
         table = await pool.query(CredentialPoolWorkflow.seats)
@@ -308,6 +315,7 @@ async def test_pool_seats_query_never_exposes_token_env(two):
         }
 
 
+@pytest.mark.temporal
 async def test_pool_reload_config_keeps_surviving_state(two, tmp_path):
     async with _running_pool(two) as pool:
         await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
@@ -340,6 +348,7 @@ seats:
         load_pool(_write_pool(tmp_path, text))
 
 
+@pytest.mark.temporal
 async def test_pool_rejects_naive_reset_and_stays_healthy(two):
     async with _running_pool(two) as pool:
         await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
@@ -360,6 +369,7 @@ async def test_pool_rejects_naive_reset_and_stays_healthy(two):
         ) == "seat-b"
 
 
+@pytest.mark.temporal
 async def test_pool_rejects_invalid_reload_config_and_stays_healthy(two):
     async with _running_pool(two) as pool:
         bad_assignments = {"swe-agent": ["seat-z"]}
@@ -410,6 +420,7 @@ def test_select_accepts_pre_011_state_without_the_key(two):
     assert _pick(two, state) == "seat-b"
 
 
+@pytest.mark.temporal
 async def test_pool_release_stores_and_clears_the_readings_reset(two):
     resets = "2026-10-12T19:00:00+00:00"
     async with _running_pool(two) as pool:
@@ -429,6 +440,7 @@ async def test_pool_release_stores_and_clears_the_readings_reset(two):
         assert (row["last_utilization"], row["utilization_resets_at"]) == (0.1, None)
 
 
+@pytest.mark.temporal
 async def test_pool_mark_exhausted_reading_expires_with_the_exhaustion(two):
     resets = "2026-10-12T19:00:00+00:00"
     async with _running_pool(two) as pool:
@@ -440,6 +452,7 @@ async def test_pool_mark_exhausted_reading_expires_with_the_exhaustion(two):
         assert (row["last_utilization"], row["utilization_resets_at"]) == (1.0, resets)
 
 
+@pytest.mark.temporal
 async def test_pool_rejects_naive_reading_reset(two):
     async with _running_pool(two) as pool:
         await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
@@ -452,6 +465,7 @@ async def test_pool_rejects_naive_reading_reset(two):
         assert (await pool.query(CredentialPoolWorkflow.seats))["seat-a"]["active_leases"] == 1
 
 
+@pytest.mark.temporal
 async def test_pool_upgrades_state_carried_from_009(two):
     old = {k: v for k, v in new_seat_state().items() if k != "utilization_resets_at"}
     async with _running_pool({**two, "state": {"seat-a": dict(old, last_utilization=0.5)}}) as pool:
@@ -482,6 +496,7 @@ def test_expiring_seats_uses_the_warn_threshold():
     assert [s for s, _, _ in expiring_seats(pool, date(2026, 10, 10))] == ["soon", "edge", "expired"]
 
 
+@pytest.mark.temporal
 async def test_pool_seat_table_shows_days_until_expiry(two):
     async with _running_pool(two) as pool:
         table = await pool.query(CredentialPoolWorkflow.seats)
@@ -521,6 +536,7 @@ def test_load_pool_normalizes_a_quoted_date(tmp_path):
     assert load_pool(_write_pool(tmp_path, text))["seats"]["seat-a"]["token_expires_on"] == "2027-10-10"
 
 
+@pytest.mark.temporal
 async def test_pool_rejects_reload_config_with_a_non_date_expiry(two):
     async with _running_pool(two) as pool:
         bad = {**two["seats"], "seat-b": {**two["seats"]["seat-b"], "token_expires_on": "Oct 2027"}}
@@ -542,6 +558,7 @@ def test_earliest_reset_only_counts_given_seats_and_skips_invalid():
     assert earliest_reset(state, NOW) == later.isoformat()
 
 
+@pytest.mark.temporal
 async def test_pool_earliest_reset_for_uses_the_agents_own_seats(two):
     """architect-agent has only seat-b: seat-a's sooner reset is not its wait."""
     soon = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
@@ -555,6 +572,7 @@ async def test_pool_earliest_reset_for_uses_the_agents_own_seats(two):
         assert await pool.query(CredentialPoolWorkflow.earliest_reset_for, "nobody") is None
 
 
+@pytest.mark.temporal
 async def test_pool_reset_seat_clears_the_exhaustion_reading(two):
     async with _running_pool(two) as pool:
         await pool.execute_update(CredentialPoolWorkflow.acquire, args=["swe-agent", "k1"])
