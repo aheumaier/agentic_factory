@@ -16,8 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # jq + uv: this repo's own Claude Code hooks (.claude/hooks/) need both and
 # fail closed without them. swe-agent loads project settings, so those hooks
 # run here whenever the target repo is agentic_factory itself (specs/010
-# FR-014). uv is pinned to the version the operator's host runs.
-COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /bin/
+# FR-014). uv is pinned to the version the operator's host runs. It comes
+# from PyPI, not `COPY --from=ghcr.io/astral-sh/uv`: E2B's template builder
+# rejects multi-stage COPY (e2b CLI 2.21.2, 2026-10-11).
+RUN pip install --no-cache-dir "uv==0.10.0"
 
 WORKDIR /app
 # Mirrors the dependencies in harness/swe-agent/pyproject.toml; the project
