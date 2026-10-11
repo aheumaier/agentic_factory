@@ -323,6 +323,12 @@ with this feature unchanged. In the sandbox, `swe-agent` runs `bypassPermissions
 Hook `deny` applies in every mode *[doc: hooks]*, so AF-COMMIT and AF-SPEC are still
 enforced there, while the `permissions.ask` rules are a known limit (R1).
 
+**Update 2026-10-11 (88862ba)**: E2B's template builder (e2b CLI 2.21.2) rejects
+the multi-stage `COPY --from`, so the template could not be rebuilt. The
+Dockerfile now installs the same pinned version with
+`pip install --no-cache-dir "uv==0.10.0"`. The rebuilt `swe-agent-sandbox`
+template runs `jq-1.7` and `uv 0.10.0`.
+
 ## R14. Context budget and continuity across /compact and /clear (added 2026-10-10, after `/speckit-tasks`)
 
 **Trigger**: operator guidance caps agent-session context at **150k tokens**. The

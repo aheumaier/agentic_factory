@@ -457,7 +457,8 @@ re-parsing (FR-009).
     2. Done. `--locked` passes for both pairs, so `uv lock` was not re-run and both lockfiles equal main's. The five `(pending 009)` markers are dropped; the drift test failed on them right after the rebase, as designed.
     3. Done. CLAUDE.md: 009 and 011 merged, `specs/008-gate-decision-core/` (Draft) cited by path, 010 in flight. T019 is closed. The pyproject comment now names the Stop gate and AF-COMMIT.
     4. Done. The module mixes pure and live tests, so the 18 `_running_pool` tests carry a per-test `@pytest.mark.temporal`, not a `pytestmark`.
-    5.–7. Open for the operator.
+    5. Done 2026-10-11 (88862ba, after the merge). The `swe-agent-sandbox` E2B template was rebuilt and runs `jq-1.7` and `uv 0.10.0`. uv now comes from pip; see T043.
+    6.–7. Open. Moved to the follow-up spec, specs/012 (operator decision, 2026-10-11).
     Gates: ruff clean; `tests/` 271 passed; `orchestration/` 167 passed; with `-m "not temporal"` 120 passed, 47 deselected. Local arm64 `docker build` of the sandbox image prints `jq-1.7` and `uv 0.10.0`; image removed afterwards.
   - **Deferred follow-ups** (the operator chose to record them all, with no further hook edits in this commit):
     - Gate overrun: the policy hook has a 300s timeout. A timeout is a non-blocking error, so a slow live-Temporal suite lets the commit through. Wrap the suites in a shorter inner timeout that denies on overrun.
@@ -477,6 +478,7 @@ re-parsing (FR-009).
     - `policy.sh` allows on unreadable or empty stdin (theoretical).
     - The context warning may read a stale pre-compaction usage value (uncertain).
 - [x] T043 Verify FR-025 without editing it: `git diff sandbox/swe-agent/Dockerfile` shows `jq` in the apt line and `COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /uvx /bin/` (research R13). Leave it **unchanged**; it's committed with the feature in T046. If Docker is available, run quickstart §5 (`docker build … && docker run … 'jq --version && uv --version'` → uv 0.10.0); otherwise note it as unrun. The operator has `E2B_API_KEY` and the `e2b` CLI set up (2026-10-10). Rebuilding the real `swe-agent-sandbox` template (`e2b template build` in `sandbox/swe-agent/`) changes what live `swe-agent` runs use, so do it **only with explicit operator approval**, after the feature is merged or on the operator's instruction. A local `docker build` is the default check.
+  **Superseded 2026-10-11 by 88862ba:** E2B's builder rejects the multi-stage `COPY --from`, so uv 0.10.0 now comes from `pip install --no-cache-dir "uv==0.10.0"` (research R13).
 
   **Done 2026-10-11.** The diff shows both lines; the Dockerfile is unchanged. Local arm64 build (Docker 29.2.1, aarch64) printed `jq-1.7` and `uv 0.10.0`. Quickstart §5's build command used `sandbox/swe-agent` as the context, which fails on `COPY harness/swe-agent/agent.py`; it now builds from the repo root with `-f`, as the Dockerfile's own header says, and removes the image afterwards. `e2b template build` not run.
 - [x] T044 Run quickstart §1 (automated) from the worktree root:
