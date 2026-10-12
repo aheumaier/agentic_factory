@@ -5,7 +5,8 @@ Pure tests need nothing; workflow tests run against a real local Temporal
 server (`make up`), like every other Temporal-facing test in this repo, and
 skip without one. Every pool workflow started here is terminated in a
 `finally` — it never completes on its own, so a missed terminate would leak
-a live workflow onto the dev server for every test run.
+a live workflow onto the dev server for every test run. A killed test process
+skips the `finally`, so each pool also carries TEST_WORKFLOW_TIMEOUT (specs/014).
 """
 import contextlib
 import uuid
@@ -26,6 +27,7 @@ from credentials.pool import (
     select_seat,
     token_for,
 )
+from tests._workflow_limits import TEST_WORKFLOW_TIMEOUT
 from workflows.credential_pool import CredentialPoolWorkflow
 
 NOW = datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
@@ -213,6 +215,7 @@ async def _running_pool(pool: dict):
         handle = await client.start_workflow(
             CredentialPoolWorkflow.run, pool,
             id=f"credential-pool-test-{run_id}", task_queue=task_queue,
+            execution_timeout=TEST_WORKFLOW_TIMEOUT,
         )
         try:
             yield handle

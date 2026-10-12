@@ -13,6 +13,7 @@ from temporalio import workflow
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from tests._workflow_limits import TEST_WORKFLOW_TIMEOUT, recorded_limit
 from webhook_bridge import temporal_client
 
 pytestmark = pytest.mark.temporal
@@ -63,10 +64,13 @@ async def test_real_temporal_start_resolve_and_signal_round_trip() -> None:
             id=wf_id,
             task_queue=TASK_QUEUE,
             search_attributes={"TargetRepo": [repo], "PRNumber": [pr_number]},
+            execution_timeout=TEST_WORKFLOW_TIMEOUT,
         )
         assert handle.id == wf_id
 
         try:
+            assert await recorded_limit(handle) == TEST_WORKFLOW_TIMEOUT  # specs/014
+
             # Visibility indexing (search attributes) is eventually
             # consistent — poll briefly rather than assuming the write is
             # visible immediately.
