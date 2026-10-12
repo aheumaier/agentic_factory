@@ -20,13 +20,36 @@ work that the operator chose not to do inside 010:
 - three extractor rulings the drift contract does not state yet (T023, T024);
 - 16 deferred follow-ups (T042 "Deferred follow-ups");
 - one new failure seen on 2026-10-11, after 010 merged: the repo policy stopped
-  running for the rest of a session once that session removed its launch worktree and
-  entered a new one. A Write under `harness/` on a branch without a spec was not
-  denied. The cause is not verified.
+  running for the rest of a session. A Write under `harness/` on a branch without a
+  spec was not denied. Research R1 reproduced the cause from the session record: a
+  `git reset --hard origin/main` in the launch worktree removed
+  `.claude/hooks/policy.sh`. The session kept the hook configuration it loaded at
+  launch, so the hook still pointed at that missing script. `/bin/sh` exited 127,
+  and Claude Code treats that as a non-blocking error, so the call ran unchecked.
+  Removing the launch worktree fails the same way.
 
 This feature closes those items. The source text for each item is in
 `specs/010-dev-harness-hardening/tasks.md` (T023, T024, T036, T042) and in the two
 010 contracts, `contracts/hook-interface.md` and `contracts/drift-conventions.md`.
+
+## Clarifications
+
+### Session 2026-10-11
+
+- Q: AF-COMMIT denies the red commit that swe-agent's `IMPLEMENT_PROMPT` asks for.
+  Keep denying and record a known gap (A), exempt sandbox runs through an env
+  marker (B), or drop the commit instruction from `IMPLEMENT_PROMPT` (C)? → A: C.
+  The prompt stops telling the agent to commit, matching `TASK_PROMPT`; the harness's
+  own end-of-run checkpoint commit (`agent.py` `TaskCheckpointer.finish`, plain
+  `git`, never seen by AF-COMMIT) already commits what is left. Facts found while
+  deciding: a denied model commit loses no work (that end-of-run commit still lands),
+  only the agent's explanation of failing checks; the Eval-Gate runs no tests, so an
+  exempted red commit would pass it.
+- Q: Should the drift test check lowercase non-private names in the reviewer prompt?
+  → A: No, they stay unchecked. Evidence: the extractor run on 2026-10-11 found 6
+  lowercase underscore names in the reviewer prompt; 4 exist in code, 2 would be
+  false positives (`agentic_factory` is the repo name, `require_tools` is a shell
+  function and D-ID searches only `*.py`).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -66,12 +89,15 @@ is denied.
 3. **Given** a tool call whose hook input is empty or not readable, **When** the
    policy runs, **Then** the call is denied, not allowed.
 4. **Given** a red working tree, **When** the agent runs `git revert`, `git
-   cherry-pick`, `git merge`, `git am` or `git rebase` in a form that creates a
-   commit, **Then** the command is denied with `[AF-COMMIT]`, just as `git commit`
-   is.
+   cherry-pick`, `git merge`, `git am`, `git rebase` or `git pull` in a form that
+   can create a commit, **Then** the command is denied with `[AF-COMMIT]`, just as
+   `git commit` is.
 5. **Given** a red working tree in the middle of a rebase, cherry-pick, merge or am,
    **When** the agent aborts it (`--abort`, `--quit`), **Then** the command is
    allowed.
+6. **Given** a red working tree and `pull.rebase` unset or `false`, **When** the
+   agent runs `git pull --ff-only` with no other option, **Then** the command is
+   allowed, because it cannot create a commit (research R5).
 
 ---
 
@@ -80,7 +106,8 @@ is denied.
 A reviewer reads `contracts/hook-interface.md` to know what a rule blocks. Today the
 code blocks more than the contract says for AF-SECRET, and less than the operator
 expects for AF-SPEC and the shell secret check. After this story, contract, code and
-tests agree, and the remaining sandbox question is decided and written down.
+tests agree, and `swe-agent`'s prompt no longer asks for a commit that AF-COMMIT
+denies.
 
 **Why this priority**: The contract is how a reviewer judges a change to the hooks.
 When code and contract disagree, the next change can "fix" the code back to the
@@ -106,9 +133,11 @@ every case the tests pin is stated in the contract.
 4. **Given** the amended contract, **When** a reviewer compares its AF-SECRET rules
    with the tests, **Then** case-folding, the glob-field checks and "any directory"
    are all stated.
-5. **Given** a `swe-agent` run inside the E2B sandbox against this repo, **When** the
-   agent commits with failing local checks as its prompt allows, **Then** the outcome
-   matches the decision recorded under FR-011.
+5. **Given** a `swe-agent` run on the `IMPLEMENT_PROMPT` path (Gate-feedback retry,
+   ID-less task or several task files) whose local checks fail, **When** the run
+   ends, **Then** the agent has not run `git commit`, the harness's end-of-run
+   checkpoint commit holds the work, and the reason the checks fail reaches the
+   reviewer (FR-011).
 
 ---
 
@@ -188,18 +217,20 @@ identifier in the repo: the drift test is not affected by it.
 
 ### Edge Cases
 
-- **Launch worktree removed, cause unknown (US1)**: the 2026-10-11 cause is a guess.
-  The plan must first reproduce it and record the cause in research. If the hooks
-  cannot be made to follow the session's current worktree, the fallback is that the
-  harness detects the lost hooks and says so (FR-001), and CLAUDE.md tells the
-  operator to start a new session instead of removing the launch worktree.
+- **Hook scripts gone from the launch worktree (US1)**: research R1 records the
+  2026-10-11 cause (see Context). The hooks first look for the scripts in the
+  session's current worktree, then in the launch directory. If neither has them, the
+  harness says so with `[AF-HOOKS]` (FR-001), and CLAUDE.md tells the operator to
+  start a new session instead of removing or resetting the launch worktree.
 - **`git rebase --continue` on a red tree (US1)**: it creates a commit, so AF-COMMIT
   judges it. The working tree at that moment is the replayed commit plus the
   resolved conflict, which is what will be committed.
-- **`git merge --ff-only` and `git pull` (US1)**: they may create no commit. Judging
-  them anyway is an accepted false positive, in line with the contract's rule that
-  false positives are accepted and false negatives are not. `git pull` is not added
-  unless the plan shows it can create a merge commit in this repo's setup.
+- **`git merge --ff-only` and `git pull` (US1)**: `git merge --ff-only` creates no
+  commit, but it is still gated. That is an accepted false positive, in line with the
+  contract's rule that false positives are accepted and false negatives are not.
+  `git pull` is gated: with this repo's unset `pull.rebase` and `pull.ff`, a pull on
+  a diverged branch creates a merge commit (research R5). Only a plain
+  `git pull --ff-only`, with `pull.rebase` unset or `false`, is exempt.
 - **Rebase with no spec on the branch being rebased (US3)**: AF-SPEC denies, as it
   would on that branch outside a rebase.
 - **Rebase of a branch whose spec dir appears only in a later commit (US3)**: the
@@ -223,18 +254,23 @@ identifier in the repo: the drift test is not affected by it.
 - **FR-001**: Once a session can no longer run the repo's hook scripts (for example
   because its launch worktree was removed), the harness MUST either keep applying the
   rules from the session's current worktree, or deny each covered tool call with a
-  message that names the problem and the recovery step. It MUST NOT silently allow.
-  The plan MUST first reproduce the 2026-10-11 failure and record its cause.
+  message that names the problem and the recovery step. That message carries the ID
+  `AF-HOOKS`. It MUST NOT silently allow. The 2026-10-11 failure is reproduced and
+  its cause recorded in research R1.
 - **FR-002**: Repo-relative paths in all hooks MUST resolve against the session's
   current worktree after a mid-session worktree change, or FR-001's fallback applies.
 - **FR-003**: The commit gate MUST deny the commit when its lint and test run exceeds
   an inner time limit set below the hook's own time limit. The deny message MUST say
   that the gate timed out.
-- **FR-004**: The policy hook MUST deny when its input is empty, unreadable or not
-  valid JSON.
+- **FR-004**: The policy hook MUST deny with `[AF-HOOKS]` when its input is empty,
+  unreadable or not valid JSON.
 - **FR-005**: AF-COMMIT MUST also gate `git revert`, `git cherry-pick`, `git merge`,
-  `git am` and `git rebase` (including `--continue`), in the forms that can create a
-  commit. `--abort`, `--quit` and `--skip` MUST NOT be gated.
+  `git am`, `git rebase` (including `--continue`) and `git pull`, in the forms that
+  can create a commit. The plain `--abort` and `--quit` forms MUST NOT be gated, and
+  neither MUST a plain `git pull --ff-only` while `pull.rebase` is unset or `false`
+  (research R5; added 2026-10-12). `--skip` is gated, because it
+  resumes the replay and writes the remaining commits (corrected 2026-10-12 to match
+  US1 scenario 5).
 
 **Rules match their contracts (US2)**
 
@@ -252,16 +288,21 @@ identifier in the repo: the drift test is not affected by it.
   `<root>/Harness/a.py`.
 - **FR-009**: The shell secret check MUST fold case and MUST treat `` ` ``, `@`, `{`
   and `,` as delimiters before `.env`, in addition to the current ones.
-  `.env.example` MUST keep passing in every spelling.
+  `.env.example` MUST keep passing in every spelling. The Grep `glob` and Glob
+  `pattern` checks share that pattern, so they widen too: a glob such as
+  `{.env,x}` or `x:.env` is denied as well. This change MUST be stated in the 012
+  contract and pinned by a test (FR-010).
 - **FR-010**: Every behaviour added by FR-003 to FR-009 MUST be stated in the 012
   contracts and pinned by at least one test that fails on the old behaviour.
-- **FR-011**: A `swe-agent` run inside the E2B sandbox against this repo runs under
-  a prompt that asks it to commit even when local checks fail. AF-COMMIT denies that
-  commit today. The harness MUST [NEEDS CLARIFICATION: keep denying it and record
-  this in CLAUDE.md as a known gap (the run then ends with no commit for that
-  attempt), or exempt sandbox runs from AF-COMMIT through an environment marker set
-  only by the sandbox launcher (the commit then lands red and the Eval-Gate judges
-  it)?]. This is the decision T042 item 6 asks for.
+- **FR-011**: `swe-agent`'s `IMPLEMENT_PROMPT` MUST NOT tell the agent to commit,
+  matching `TASK_PROMPT`. The harness's end-of-run checkpoint commit stays the only
+  commit on that path, so AF-COMMIT has no model commit to deny and stays unchanged,
+  with no sandbox exemption. When local checks still fail, the agent's account of why
+  MUST still reach the human reviewer (the old prompt put it in the commit message;
+  the plan picks the new place). The same account MUST also reach the reviewer on the
+  per-task `TASK_PROMPT` path (widened 2026-10-12, research R8). Tests that pin the prompt text and
+  `docs/40-sequence-swe-agent-runtime.md` MUST match. This is the decision T042 item
+  6 asks for (operator, 2026-10-11).
 
 **Gate recovery (US3)**
 
@@ -274,8 +315,8 @@ identifier in the repo: the drift test is not affected by it.
   the branch being rebased and accept a `specs/NNN-*/tasks.md` that exists on that
   branch's tip.
 - **FR-015**: When the shared hook library cannot be loaded, the policy hook MUST
-  keep denying, and the deny message MUST name the library and the manual recovery
-  step. CLAUDE.md MUST describe that recovery.
+  keep denying with `[AF-HOOKS]`, and the deny message MUST name the library and the
+  manual recovery step. CLAUDE.md MUST describe that recovery.
 - **FR-016**: Turn start MUST prune `ctx-*.level` and `exception-*.notified` with the
   same retention rule it already uses for turn snapshots.
 - **FR-017**: The context warning MUST NOT be based on a usage value recorded before
@@ -293,11 +334,9 @@ identifier in the repo: the drift test is not affected by it.
   - D-REG splits sentences on a dot followed by any whitespace (newline included) and
     on blank lines.
 - **FR-019**: Lowercase names that are not private (for example `shape_issue`,
-  `execute_activity`, `retry_policy`) MUST [NEEDS CLARIFICATION: stay unchecked, as
-  the drift contract says today (a rename goes unnoticed, but no new false
-  positives), or be checked when they appear in code formatting in the reviewer
-  prompt (renames are caught; common words in code formatting may need an
-  allow-list)?].
+  `execute_activity`, `retry_policy`) MUST stay unchecked, as the drift contract
+  says today. The 012 drift contract MUST state this as a deliberate ruling with its
+  cost: a rename of such a name goes unnoticed (operator, 2026-10-11).
 - **FR-020**: The D-ID corpus MUST contain only tracked files and untracked files that
   git does not ignore.
 - **FR-021**: The end-of-turn gate MUST run the drift test when the turn changed any
@@ -352,10 +391,15 @@ Every item from the sources maps to a requirement or to an explicit exclusion.
 - **Repo rule**: one of AF-SPEC, AF-SECRET, AF-COMMIT, AF-REGISTRY, AF-HARNESS. It has
   an ID, a set of covered actions, a verdict (allow, deny, ask) and a message that
   starts with the ID and names the way out.
+- **Harness message `AF-HOOKS`**: not a sixth rule. It is the ID on the refusal or
+  notice the harness gives when it cannot check a call at all: the hook scripts are
+  not found (FR-001), the policy hook gets no valid input (FR-004), or the hook
+  library cannot be loaded (FR-015). Its message has the same format as a rule's and
+  is listed in CLAUDE.md's rule table (FR-024).
 - **Hook contract**: the normative text in the 010 and 012 contracts that says what
   each rule covers. Code and tests must agree with it.
-- **Turn snapshot**: the per-session record of Python-relevant files taken at turn
-  start. It is the baseline the end-of-turn gate compares against.
+- **Turn snapshot**: the per-session record of the gated files (Python-relevant files,
+  hook scripts, settings and the drift-tier docs) taken at turn start. It is the baseline the end-of-turn gate compares against.
 - **Hook state files**: the per-session files the hooks keep between calls (turn
   snapshots, context-warning levels, exception notices). They are pruned by age.
 - **Drift corpus**: the set of files the drift test searches for identifiers named in
@@ -373,8 +417,9 @@ Every item from the sources maps to a requirement or to an explicit exclusion.
 - **SC-002**: In automated tests, 100% of commit attempts whose gate exceeds the
   inner time limit are denied, and 100% of policy calls with empty or invalid input
   are denied.
-- **SC-003**: In automated tests, each of the five commit-making git commands from
-  FR-005 is denied on a red tree, and each abort form is allowed.
+- **SC-003**: In automated tests, each of the six commit-making git commands from
+  FR-005 is denied on a red tree, `--skip` is denied, and each `--abort` and `--quit`
+  form and the plain `git pull --ff-only` are allowed.
 - **SC-004**: In automated tests, every path and command spelling listed in FR-008
   and FR-009 gets the same verdict as its plain form, and `.env.example` passes in
   every spelling.
@@ -394,12 +439,14 @@ Every item from the sources maps to a requirement or to an explicit exclusion.
 
 - The work stays inside this repo's harness: `.claude/hooks/**`,
   `.claude/settings.json`, the repo test suites, CLAUDE.md, the reviewer prompt and
-  the contracts. User-level settings (`~/.claude`) are out of scope.
+  the contracts, plus `swe-agent`'s `IMPLEMENT_PROMPT` for FR-011. User-level
+  settings (`~/.claude`) are out of scope.
 - Every edit to `.claude/settings.json` and `.claude/hooks/**` prompts the operator
   (AF-HARNESS). That is expected and is not worked around.
-- The 2026-10-11 cause (the hooks still point at the removed launch worktree, and a
-  missing hook script counts as a non-blocking error) is a hypothesis. FR-001 asks the
-  plan to confirm it before choosing a fix.
+- The 2026-10-11 cause is confirmed (research R1): the session keeps the hook
+  configuration it loaded at launch, and a missing hook script counts as a
+  non-blocking error. That Claude Code snapshots the hook configuration at launch is
+  observed, not confirmed in its source. The fix does not depend on it.
 - On an unloadable hook library, the harness keeps failing closed and documents the
   recovery (FR-015), instead of allowing edits under `.claude/hooks/**`. Failing
   closed matches every other missing-tool case in 010.
@@ -416,6 +463,8 @@ Every item from the sources maps to a requirement or to an explicit exclusion.
   checklist that needs fresh sessions, relaunches and `/clear`, not agent work.
 - Rewording the `7d005ba` commit message (won't fix; main is protected; operator
   decision 2026-10-11).
-- Rebuilding the `swe-agent-sandbox` E2B template, unless FR-011's decision needs a
-  change that only a rebuild can ship. Any rebuild needs the operator's approval.
+- Rebuilding the `swe-agent-sandbox` E2B template on the agent's own initiative.
+  FR-011 changes `harness/swe-agent/agent.py`, which the image copies in, so live
+  runs keep the old prompt until a rebuild. The rebuild is an operator step after
+  merge, with the operator's approval (as in 010 T043).
 - Following symlinks in AF-SPEC or AF-SECRET path checks.

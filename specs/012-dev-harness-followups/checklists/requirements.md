@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain
+- [x] No [NEEDS CLARIFICATION] markers remain
 - [x] Requirements are testable and unambiguous
 - [x] Success criteria are measurable
 - [x] Success criteria are technology-agnostic (no implementation details)
@@ -39,13 +39,12 @@
   `/speckit-plan`.
 - "Written for non-technical stakeholders": the audience is the operator (a
   developer). Stories are phrased around operator and agent outcomes.
-- Two [NEEDS CLARIFICATION] markers are open, both operator decisions carried over
-  from 010:
-  - FR-011: AF-COMMIT inside the E2B sandbox (010 T042 "Before merge" item 6).
-  - FR-019: whether lowercase non-private names stay unchecked by the drift test
-    (010 T023/T024).
-  Resolve them with `/speckit-clarify` or by answering in chat before
-  `/speckit-plan`.
+- The two [NEEDS CLARIFICATION] markers carried over from 010 were resolved by
+  `/speckit-clarify` on 2026-10-11 (spec.md "Clarifications"):
+  - FR-011 (010 T042 "Before merge" item 6): `IMPLEMENT_PROMPT` stops telling the
+    agent to commit; AF-COMMIT is unchanged, with no sandbox exemption.
+  - FR-019 (010 T023/T024): lowercase non-private names stay unchecked by the
+    drift test.
 - The unloadable hook library case (deferred item 8) was not made a marker. The
   spec assumes fail closed with a documented recovery (Assumptions, FR-015),
   matching every other missing-tool case in 010.
