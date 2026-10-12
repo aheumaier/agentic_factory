@@ -10,7 +10,9 @@ budget-charging and signal-gating logic, and (specs/009) its credential-pool
 seat leasing/handoff, not about run_architect_stage() or
 run_swe_agent_activity() themselves (each has its own test suite). The seat
 activities and CredentialPoolWorkflow are the real ones, against a per-test
-pool that is terminated in a `finally`.
+pool. `_harness` terminates the pool and the pipeline workflow in a `finally`,
+and both carry TEST_WORKFLOW_TIMEOUT, so a killed run leaves nothing running
+for long (specs/014).
 """
 import asyncio
 import contextlib
@@ -21,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import Client, WorkflowFailureError
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.exceptions import ApplicationError, CancelledError
 from temporalio.worker import Worker
 
@@ -30,6 +32,7 @@ from activities import (
     release_seat_activity,
     report_seat_failure_activity,
 )
+from tests._workflow_limits import TEST_WORKFLOW_TIMEOUT, recorded_limit
 from workflows.credential_pool import CredentialPoolWorkflow
 from workflows.pipeline_workflow import AgentPipelineWorkflow
 
@@ -51,6 +54,20 @@ def _pool(*seat_ids: str, max_concurrent: int = 1) -> dict:
         },
         "assignments": {a: list(seat_ids) for a in ("swe-agent", "architect-agent")},
     }
+
+
+def _pipeline_id(run_id: str) -> str:
+    return f"pipeline-workflow-test-{run_id}"
+
+
+async def _start(client, run_id):
+    return await client.start_workflow(
+        AgentPipelineWorkflow.run,
+        args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
+        id=_pipeline_id(run_id),
+        task_queue=f"{TASK_QUEUE}-{run_id}",
+        execution_timeout=TEST_WORKFLOW_TIMEOUT,
+    )
 
 
 @contextlib.asynccontextmanager
@@ -78,10 +95,14 @@ async def _harness(
         ):
             pool_handle = await client.start_workflow(
                 CredentialPoolWorkflow.run, pool or _pool(), id=pool_id, task_queue=task_queue,
+                execution_timeout=TEST_WORKFLOW_TIMEOUT,
             )
             try:
                 yield pool_handle
             finally:
+                # specs/014: the pipeline workflow too, which a failed test leaves parked.
+                with contextlib.suppress(Exception):  # best-effort cleanup only
+                    await client.get_workflow_handle(_pipeline_id(run_id)).terminate()
                 with contextlib.suppress(Exception):  # best-effort cleanup only
                     await pool_handle.terminate()
     finally:
@@ -228,12 +249,7 @@ async def test_approve_first_pass_no_gap_round_charges_nothing():
     activities = _stub_activities(calls, [_plan_result()])
 
     async with _harness(client, run_id, activities):
-        handle = await client.start_workflow(
-            AgentPipelineWorkflow.run,
-            args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-            id=f"pipeline-workflow-test-{run_id}",
-            task_queue=f"{TASK_QUEUE}-{run_id}",
-        )
+        handle = await _start(client, run_id)
         await _wait_plan_parked(handle, 1)
         await handle.signal(AgentPipelineWorkflow.plan_approved)
         result = await handle.result()
@@ -250,12 +266,7 @@ async def test_reject_once_then_approve_charges_one_and_carries_feedback():
     activities = _stub_activities(calls, [_plan_result(), _plan_result()])
 
     async with _harness(client, run_id, activities):
-        handle = await client.start_workflow(
-            AgentPipelineWorkflow.run,
-            args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-            id=f"pipeline-workflow-test-{run_id}",
-            task_queue=f"{TASK_QUEUE}-{run_id}",
-        )
+        handle = await _start(client, run_id)
         await _wait_plan_parked(handle, 1)
         await handle.signal(AgentPipelineWorkflow.plan_rejected, "use candidate B")
         await _wait_plan_parked(handle, 2)
@@ -279,12 +290,7 @@ async def test_gap_round_ran_charges_budget_even_when_approved():
     activities = _stub_activities(calls, [_plan_result(gap_round_ran=True)])
 
     async with _harness(client, run_id, activities):
-        handle = await client.start_workflow(
-            AgentPipelineWorkflow.run,
-            args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-            id=f"pipeline-workflow-test-{run_id}",
-            task_queue=f"{TASK_QUEUE}-{run_id}",
-        )
+        handle = await _start(client, run_id)
         await _wait_plan_parked(handle, 1)
         await handle.signal(AgentPipelineWorkflow.plan_approved)
         result = await handle.result()
@@ -299,12 +305,7 @@ async def test_idempotent_hit_skips_charge_and_goes_straight_to_gate():
     activities = _stub_activities(calls, [_plan_result(idempotent_hit=True)])
 
     async with _harness(client, run_id, activities):
-        handle = await client.start_workflow(
-            AgentPipelineWorkflow.run,
-            args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-            id=f"pipeline-workflow-test-{run_id}",
-            task_queue=f"{TASK_QUEUE}-{run_id}",
-        )
+        handle = await _start(client, run_id)
         await _wait_plan_parked(handle, 1)
         await handle.signal(AgentPipelineWorkflow.plan_approved)
         result = await handle.result()
@@ -328,12 +329,7 @@ async def test_malformed_retries_exhausted_fails_immediately_no_charge():
     )
 
     async with _harness(client, run_id, activities):
-        handle = await client.start_workflow(
-            AgentPipelineWorkflow.run,
-            args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-            id=f"pipeline-workflow-test-{run_id}",
-            task_queue=f"{TASK_QUEUE}-{run_id}",
-        )
+        handle = await _start(client, run_id)
         with pytest.raises(WorkflowFailureError):
             await handle.result()
 
@@ -358,12 +354,7 @@ async def test_deterministic_failure_charges_budget_and_retries():
     )
 
     async with _harness(client, run_id, activities):
-        handle = await client.start_workflow(
-            AgentPipelineWorkflow.run,
-            args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-            id=f"pipeline-workflow-test-{run_id}",
-            task_queue=f"{TASK_QUEUE}-{run_id}",
-        )
+        handle = await _start(client, run_id)
         await _wait_plan_parked(handle, 2)
         await handle.signal(AgentPipelineWorkflow.plan_approved)
         result = await handle.result()
@@ -383,12 +374,7 @@ async def test_budget_exhaustion_after_repeated_rejection_raises():
     activities = _stub_activities(calls, [_plan_result(), _plan_result(), _plan_result()])
 
     async with _harness(client, run_id, activities):
-        handle = await client.start_workflow(
-            AgentPipelineWorkflow.run,
-            args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-            id=f"pipeline-workflow-test-{run_id}",
-            task_queue=f"{TASK_QUEUE}-{run_id}",
-        )
+        handle = await _start(client, run_id)
         for i, fb in enumerate(["no good", "still no good", "no good either"], start=1):
             await _wait_plan_parked(handle, i)
             await handle.signal(AgentPipelineWorkflow.plan_rejected, fb)
@@ -400,21 +386,35 @@ async def test_budget_exhaustion_after_repeated_rejection_raises():
     assert len(plan_calls) == 3  # budget exhausted before a 4th call
 
 
+async def test_harness_ends_a_parked_pipeline_and_both_workflows_carry_the_limit():
+    """specs/014 FR-003/FR-008: a test that fails while its pipeline workflow
+    is parked leaves nothing running, and both workflows carry the limit."""
+    client = await _connect_or_skip()
+    run_id = uuid.uuid4().hex[:8]
+    calls: list = []
+    activities = _stub_activities(calls, [_plan_result()])
+
+    class _Sentinel(Exception):
+        pass
+
+    with pytest.raises(_Sentinel):
+        async with _harness(client, run_id, activities) as pool_handle:
+            handle = await _start(client, run_id)
+            await _wait_plan_parked(handle, 1)
+            assert await recorded_limit(handle) == TEST_WORKFLOW_TIMEOUT
+            assert await recorded_limit(pool_handle) == TEST_WORKFLOW_TIMEOUT
+            raise _Sentinel
+
+    assert (await handle.describe()).status == WorkflowExecutionStatus.TERMINATED
+    assert (await pool_handle.describe()).status == WorkflowExecutionStatus.TERMINATED
+
+
 # --- Credential-pool seats (specs/009) -----------------------------------------
 
 async def _approve_and_result(client, run_id, handle):
     await _wait_plan_parked(handle, 1)
     await handle.signal(AgentPipelineWorkflow.plan_approved)
     return await handle.result()
-
-
-async def _start(client, run_id):
-    return await client.start_workflow(
-        AgentPipelineWorkflow.run,
-        args=[REPO, f"branch-{run_id}", f"agent-{run_id}", "1"],
-        id=f"pipeline-workflow-test-{run_id}",
-        task_queue=f"{TASK_QUEUE}-{run_id}",
-    )
 
 
 def _seat_error(kind: str, seat_id: str, resets_at: str | None = None) -> ApplicationError:

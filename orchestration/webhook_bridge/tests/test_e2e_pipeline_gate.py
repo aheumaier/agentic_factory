@@ -19,6 +19,7 @@ are patched.
 """
 import asyncio
 import contextlib
+import functools
 import json
 import sys
 import types
@@ -77,6 +78,7 @@ if "braintrust" not in sys.modules:
     sys.modules["braintrust"] = _bt_stub
 
 import agent  # noqa: E402 - path/stub setup above must run first
+from tests._workflow_limits import TEST_WORKFLOW_TIMEOUT, recorded_limit  # noqa: E402
 from webhook_bridge import temporal_client  # noqa: E402
 from webhook_bridge.server import BridgeApp  # noqa: E402
 from webhook_bridge.tests._pipeline_workflow_stub import AgentPipelineWorkflow  # noqa: E402
@@ -207,6 +209,19 @@ def _isolate_task_queue(monkeypatch, run_id: str) -> None:
     monkeypatch.setattr(temporal_client, "TASK_QUEUE", f"webhook-bridge-e2e-{run_id}")
 
 
+def _limit_test_starts(monkeypatch, client: Client) -> None:
+    """Give every run the bridge starts on this test's client TEST_WORKFLOW_TIMEOUT.
+
+    Patched on the test's own client, so production start_run is unchanged
+    and a killed test process still leaves nothing running for long (specs/014).
+    """
+    monkeypatch.setattr(
+        client,
+        "start_workflow",
+        functools.partial(client.start_workflow, execution_timeout=TEST_WORKFLOW_TIMEOUT),
+    )
+
+
 async def test_pm_approval_writeup_drives_real_bridge_signal(monkeypatch):
     client = await _connect_or_skip()
 
@@ -217,6 +232,7 @@ async def test_pm_approval_writeup_drives_real_bridge_signal(monkeypatch):
     version = "1"
     wf_id = temporal_client.workflow_id(REPO, agent_name, version)
     _isolate_task_queue(monkeypatch, run_id)
+    _limit_test_starts(monkeypatch, client)
 
     github_client = MagicMock()
     github_client.get_pull_request = AsyncMock(
@@ -230,7 +246,6 @@ async def test_pm_approval_writeup_drives_real_bridge_signal(monkeypatch):
     async with Worker(
         client, task_queue=temporal_client.TASK_QUEUE, workflows=[AgentPipelineWorkflow]
     ):
-        handle = None
         try:
             resp = await _post(
                 bridge,
@@ -244,6 +259,7 @@ async def test_pm_approval_writeup_drives_real_bridge_signal(monkeypatch):
             github_client.post_reaction.assert_awaited_with(REPO, 1, "rocket")
 
             handle = client.get_workflow_handle(wf_id)
+            assert await recorded_limit(handle) == TEST_WORKFLOW_TIMEOUT  # specs/014
             assert await handle.query(AgentPipelineWorkflow.stage) == "pm"
 
             calls = []
@@ -271,9 +287,9 @@ async def test_pm_approval_writeup_drives_real_bridge_signal(monkeypatch):
 
             assert await handle.query(AgentPipelineWorkflow.stage) == "plan"
         finally:
-            if handle is not None:
-                with contextlib.suppress(Exception):  # best-effort cleanup only
-                    await handle.terminate()
+            # By ID: the bridge may have started the run before a failed assert.
+            with contextlib.suppress(Exception):  # best-effort cleanup only
+                await client.get_workflow_handle(wf_id).terminate()
 
 
 async def test_pm_rejection_feedback_drives_reject_signal_and_rereview(monkeypatch):
@@ -286,6 +302,7 @@ async def test_pm_rejection_feedback_drives_reject_signal_and_rereview(monkeypat
     version = "1"
     wf_id = temporal_client.workflow_id(REPO, agent_name, version)
     _isolate_task_queue(monkeypatch, run_id)
+    _limit_test_starts(monkeypatch, client)
 
     github_client = MagicMock()
     github_client.get_pull_request = AsyncMock(
@@ -299,7 +316,6 @@ async def test_pm_rejection_feedback_drives_reject_signal_and_rereview(monkeypat
     async with Worker(
         client, task_queue=temporal_client.TASK_QUEUE, workflows=[AgentPipelineWorkflow]
     ):
-        handle = None
         try:
             resp = await _post(
                 bridge,
@@ -312,6 +328,7 @@ async def test_pm_rejection_feedback_drives_reject_signal_and_rereview(monkeypat
             assert resp.status == 202
 
             handle = client.get_workflow_handle(wf_id)
+            assert await recorded_limit(handle) == TEST_WORKFLOW_TIMEOUT  # specs/014
             assert await handle.query(AgentPipelineWorkflow.stage) == "pm"
 
             # Attempt 1: model flags scope, real review_spec() call.
@@ -386,6 +403,6 @@ async def test_pm_rejection_feedback_drives_reject_signal_and_rereview(monkeypat
 
             assert await handle.query(AgentPipelineWorkflow.stage) == "plan"
         finally:
-            if handle is not None:
-                with contextlib.suppress(Exception):  # best-effort cleanup only
-                    await handle.terminate()
+            # By ID: the bridge may have started the run before a failed assert.
+            with contextlib.suppress(Exception):  # best-effort cleanup only
+                await client.get_workflow_handle(wf_id).terminate()
