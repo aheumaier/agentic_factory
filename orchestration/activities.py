@@ -14,12 +14,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
+import aiohttp
 import yaml
 from e2b import AsyncSandbox, CommandExitException
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from credentials.pool import load_pool, token_for
+from webhook_bridge.github_app import GitHubAppClient, MintedToken
 
 # Mirrors harness/swe-agent/agent.py's own _REPO_RE/_BRANCH_RE: repo/branch
 # are workflow inputs threaded into a shell command run inside the sandbox
@@ -38,6 +40,17 @@ _SANDBOX_TEMPLATE = "swe-agent-sandbox"
 # under the Build activity's 60-min start_to_close_timeout (research R8).
 _COMMAND_TIMEOUT_SECONDS = 3300
 _SANDBOX_TIMEOUT_SECONDS = 3500
+
+# The Build sandbox's GH_TOKEN (specs/013): a GitHub App installation token
+# minted per call, for the target repo only, with exactly these rights. It
+# lives 1 h from the mint. Mint retries happen before it exists; after it, only
+# sandbox create (e2b's 60 s request timeout) and the command budget above run,
+# 3360 s at most.
+_SANDBOX_TOKEN_PERMISSIONS = {"contents": "write", "pull_requests": "write", "metadata": "read"}
+_MINT_TRIES = 3
+_MINT_RETRY_WAIT_SECONDS = 2
+# Anything shaped like a GitHub token, for _redact.
+_TOKEN_SHAPE_RE = re.compile(r"\b(gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 
 # agent.py's seat-outcome exit codes (contracts/seat-guard-and-agent-protocol.md).
 _EXIT_SEAT_EXHAUSTED = 75  # EX_TEMPFAIL
@@ -63,13 +76,23 @@ def _validate_target(repo: str, branch: str) -> None:
         raise ValueError(f"Refusing to use unexpected branch value: {branch!r}")
 
 
+def _redact(text: str, secrets: list[str | None]) -> str:
+    """`text` with each known secret, and anything token-shaped, as `***`."""
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return _TOKEN_SHAPE_RE.sub("***", text)
+
+
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(
+        # The command can carry the worker's GH_TOKEN in a clone URL.
+        raise RuntimeError(_redact(
             f"{' '.join(cmd)} failed ({result.returncode}): "
-            f"{result.stderr or result.stdout}"
-        )
+            f"{result.stderr or result.stdout}",
+            [os.environ.get("GH_TOKEN")],
+        ))
     return result.stdout.strip()
 
 
@@ -149,10 +172,58 @@ def _epoch_to_iso(epoch: int | float | None) -> str | None:
     return datetime.fromtimestamp(epoch, tz=UTC).isoformat()
 
 
-def _sandbox_envs(seat_id: str, handoff: int = 0) -> dict[str, str]:
+def _mint_failed(repo: str, reason: str) -> ApplicationError:
+    # No details and no cause: neither may carry a secret into the payload.
+    return ApplicationError(
+        f"could not mint a GitHub App token for {repo}: {reason}",
+        type="SandboxTokenMintFailed", non_retryable=True,
+    )
+
+
+def _is_transient(e: Exception) -> bool:
+    if isinstance(e, aiohttp.ClientResponseError):
+        return e.status >= 500
+    return isinstance(e, aiohttp.ClientConnectionError | asyncio.TimeoutError)
+
+
+async def _mint_sandbox_token(repo: str) -> MintedToken:
+    """A fresh App token for `repo` only, with _SANDBOX_TOKEN_PERMISSIONS only
+    (specs/013). Network errors and 5xx are retried; anything else, or a
+    grant other than the one asked for, fails the run. Never falls back to
+    the worker's own GH_TOKEN."""
+    app_id = os.environ.get("SWE_AGENT_APP_ID")
+    private_key = os.environ.get("SWE_AGENT_APP_PRIVATE_KEY")
+    if not app_id or not private_key:
+        raise _mint_failed(repo, "SWE_AGENT_APP_ID or SWE_AGENT_APP_PRIVATE_KEY is not set")
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(1, _MINT_TRIES + 1):
+            try:
+                client = GitHubAppClient(app_id, private_key, session)
+                minted = await client.mint_repo_token(repo, _SANDBOX_TOKEN_PERMISSIONS)
+                break
+            except Exception as e:  # noqa: BLE001 - mapped to a secret-free reason
+                if isinstance(e, aiohttp.ClientResponseError):
+                    reason = f"HTTP {e.status}"
+                else:
+                    reason = type(e).__name__
+                if not _is_transient(e) or attempt == _MINT_TRIES:
+                    raise _mint_failed(repo, reason) from None
+            await asyncio.sleep(_MINT_RETRY_WAIT_SECONDS)
+    name = repo.split("/", 1)[1]
+    if minted.repositories != [name] or minted.permissions != _SANDBOX_TOKEN_PERMISSIONS:
+        raise _mint_failed(repo, "grant mismatch")
+    activity.logger.info(
+        "sandbox token minted for %s: repositories=%s permissions=%s expires_at=%s",
+        repo, minted.repositories, dict(sorted(minted.permissions.items())), minted.expires_at,
+    )
+    return minted
+
+
+def _sandbox_envs(seat_id: str, seat_token: str, gh_token: str, handoff: int = 0) -> dict[str, str]:
     envs = {
-        "CLAUDE_CODE_OAUTH_TOKEN": token_for(seat_id, load_pool()),
-        "GH_TOKEN": os.environ["GH_TOKEN"],
+        "CLAUDE_CODE_OAUTH_TOKEN": seat_token,
+        # specs/013: the per-run App token, never the worker's own GH_TOKEN.
+        "GH_TOKEN": gh_token,
         # specs/011 F5: a successor (> 0) skips agent.py's "no new commit" check.
         "SEAT_HANDOFF_INDEX": str(handoff),
     }
@@ -182,15 +253,23 @@ async def run_swe_agent_activity(
     Returns {"pr_url", "seat_id", "utilization", "rate_limit_type"}. A seat
     outcome (agent.py exit 75/77 — it has already pushed its committed
     checkpoints) is raised as a typed, non-retryable ApplicationError the
-    workflow's _with_seat hands off on; the seat token itself only ever
-    travels in the sandbox env, never in a payload or message."""
+    workflow's _with_seat hands off on. The seat token and the GitHub App
+    token minted per call (specs/013) only ever travel in the sandbox env,
+    never in a payload or message. A failed mint raises
+    SandboxTokenMintFailed before any sandbox exists."""
     _validate_target(repo, branch)
+    seat_token = token_for(seat_id, load_pool())
+    minted = await _mint_sandbox_token(repo)
+    secrets = [minted.token, os.environ.get("GH_TOKEN"), seat_token]
 
-    sandbox = await AsyncSandbox.create(
-        template=_SANDBOX_TEMPLATE,
-        timeout=_SANDBOX_TIMEOUT_SECONDS,
-        envs=_sandbox_envs(seat_id, handoff),
-    )
+    try:
+        sandbox = await AsyncSandbox.create(
+            template=_SANDBOX_TEMPLATE,
+            timeout=_SANDBOX_TIMEOUT_SECONDS,
+            envs=_sandbox_envs(seat_id, seat_token, minted.token, handoff),
+        )
+    except Exception as e:
+        raise RuntimeError(f"sandbox create failed: {_redact(str(e), secrets)}") from None
     try:
         argv = ["python3", "/app/agent.py", repo, branch]
         if feedback:
@@ -210,12 +289,12 @@ async def run_swe_agent_activity(
                 raise ApplicationError(
                     "seat invalid", seat_id, type="SeatInvalid", non_retryable=True,
                 ) from None
-            raise RuntimeError(
-                f"sandbox run failed ({e.exit_code}): {e.stderr or e.stdout}"
-            ) from None
+            raise RuntimeError(_redact(
+                f"sandbox run failed ({e.exit_code}): {e.stderr or e.stdout}", secrets,
+            )) from None
         status = _parse_seat_status(result.stdout)
         return {
-            "pr_url": result.stdout.strip().splitlines()[-1],  # agent.py prints PR url last
+            "pr_url": _redact(result.stdout.strip().splitlines()[-1], secrets),  # agent.py prints PR url last
             "seat_id": seat_id,
             "utilization": status.get("utilization"),
             "rate_limit_type": status.get("rate_limit_type"),

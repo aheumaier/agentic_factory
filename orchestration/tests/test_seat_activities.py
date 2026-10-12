@@ -7,12 +7,15 @@ raises e2b's real CommandExitException exactly as `commands.run` does on a
 non-zero exit (research R8).
 """
 import json
+import logging
 
+import aiohttp
 import pytest
 from e2b import CommandExitException
 from temporalio.exceptions import ApplicationError
 
 import activities
+from webhook_bridge.github_app import MintedToken
 
 TOKEN = "sk-ant-oat01-test-only-not-a-real-token"
 
@@ -42,8 +45,54 @@ class _Result:
         self.exit_code = 0
 
 
+PAT = "github_pat_TESTONLY000000000000000000"  # the worker's own GH_TOKEN
+
+
+class _Minter:
+    """Stands in for GitHubAppClient: records each mint, and answers from
+    `outcomes` (an exception or a MintedToken) in order, then with a fresh
+    well-formed token per call."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+        self.outcomes: list = []
+        self.issued: list[str] = []
+
+    def client(self, app_id, private_key_b64, session):
+        minter = self
+
+        class _Client:
+            async def mint_repo_token(self, repo, permissions):
+                minter.calls.append((repo, dict(permissions)))
+                outcome = minter.outcomes.pop(0) if minter.outcomes else minter.token_for(repo)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                minter.issued.append(outcome.token)
+                return outcome
+
+        return _Client()
+
+    def token_for(self, repo, permissions=None, repositories=None):
+        return MintedToken(
+            token=f"ghs_MINTEDTESTONLY00000000000000{len(self.calls)}",
+            repositories=repositories or [repo.split("/", 1)[1]],
+            permissions=permissions or dict(activities._SANDBOX_TOKEN_PERMISSIONS),
+            expires_at="2026-10-11T13:00:00Z",
+        )
+
+
 @pytest.fixture
-def sandbox(monkeypatch):
+def minter(monkeypatch):
+    m = _Minter()
+    monkeypatch.setattr(activities, "GitHubAppClient", m.client)
+    monkeypatch.setattr(activities, "_MINT_RETRY_WAIT_SECONDS", 0)
+    monkeypatch.setenv("SWE_AGENT_APP_ID", "1")
+    monkeypatch.setenv("SWE_AGENT_APP_PRIVATE_KEY", "dummy")
+    return m
+
+
+@pytest.fixture
+def sandbox(monkeypatch, minter):
     holder: dict = {}
 
     class _FakeAsyncSandbox:
@@ -55,7 +104,7 @@ def sandbox(monkeypatch):
 
     monkeypatch.setattr(activities, "AsyncSandbox", _FakeAsyncSandbox)
     monkeypatch.setenv("CLAUDE_OAUTH_SEAT_A", TOKEN)
-    monkeypatch.setenv("GH_TOKEN", "ghs_test")
+    monkeypatch.setenv("GH_TOKEN", PAT)
     monkeypatch.delenv("CREDENTIAL_POOL_CONFIG", raising=False)
     monkeypatch.delenv("SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS", raising=False)
     monkeypatch.delenv("SEAT_GUARD_FORCE_EXHAUST_SEAT", raising=False)
@@ -107,12 +156,13 @@ async def test_success_returns_dict_with_usage(sandbox):
     assert box.killed
 
 
-async def test_sandbox_env_carries_seat_token_not_api_key(sandbox):
+async def test_sandbox_env_carries_seat_token_not_api_key(sandbox, minter):
     box = sandbox(_Result(_ok_stdout()))
     await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
     envs = box.created_with["envs"]
     assert envs["CLAUDE_CODE_OAUTH_TOKEN"] == TOKEN
-    assert envs["GH_TOKEN"] == "ghs_test"
+    assert envs["GH_TOKEN"] == minter.issued[0]  # specs/013: the minted App token
+    assert not any("github_pat_" in v for v in envs.values())
     assert "ANTHROPIC_PLATFORM_API_KEY" not in envs
     assert "SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS" not in envs
 
@@ -176,11 +226,176 @@ async def test_force_hook_forwarded_only_for_named_seat(sandbox, monkeypatch):
     assert "SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS" not in box.created_with["envs"]
 
 
-async def test_unknown_seat_fails_before_any_sandbox(sandbox):
+async def test_unknown_seat_fails_before_any_sandbox(sandbox, minter):
     box = sandbox(_Result(_ok_stdout()))
     with pytest.raises(KeyError, match="unknown seat"):
         await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-z")
     assert box.created_with == {}
+    assert minter.calls == []  # specs/013: no token is minted for a run that can't start
+
+
+# --- specs/013: per-run GitHub App token for the Build sandbox ----------------
+
+async def test_mint_asks_for_target_repo_and_sandbox_rights(sandbox, minter):
+    sandbox(_Result(_ok_stdout()))
+    await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert minter.calls == [("o/r", {"contents": "write", "pull_requests": "write",
+                                     "metadata": "read"})]
+
+
+async def test_each_call_mints_its_own_token(sandbox, minter):
+    first = sandbox(_Result(_ok_stdout()))
+    await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    second = sandbox(_Result(_ok_stdout()))
+    await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a", 1)
+    assert len(minter.calls) == 2
+    assert first.created_with["envs"]["GH_TOKEN"] != second.created_with["envs"]["GH_TOKEN"]
+
+
+async def _mint_failure(sandbox, minter, *outcomes) -> ApplicationError:
+    box = sandbox(_Result(_ok_stdout()))
+    minter.outcomes = list(outcomes)
+    with pytest.raises(ApplicationError) as exc:
+        await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert box.created_with == {}  # no sandbox, so no fallback to the worker's token
+    assert exc.value.type == "SandboxTokenMintFailed"
+    assert exc.value.non_retryable
+    assert list(exc.value.details) == []
+    # `from None` where raised inside `except`: no chained exception reaches the history
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None or exc.value.__suppress_context__
+    return exc.value
+
+
+@pytest.mark.parametrize("error, reason", [
+    (aiohttp.ClientResponseError(None, (), status=502), "HTTP 502"),
+    (aiohttp.ClientConnectionError(), "ClientConnectionError"),
+    (TimeoutError(), "TimeoutError"),
+])
+async def test_transient_mint_error_is_retried_then_fails(sandbox, minter, error, reason):
+    err = await _mint_failure(sandbox, minter, error, error, error)
+    assert err.message == f"could not mint a GitHub App token for o/r: {reason}"
+    assert len(minter.calls) == activities._MINT_TRIES == 3
+
+
+async def test_transient_mint_error_then_success_runs(sandbox, minter):
+    box = sandbox(_Result(_ok_stdout()))
+    minter.outcomes = [aiohttp.ClientResponseError(None, (), status=503)]
+    await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert len(minter.calls) == 2
+    assert box.created_with["envs"]["GH_TOKEN"] == minter.issued[0]
+
+
+@pytest.mark.parametrize("error, reason", [
+    (aiohttp.ClientResponseError(None, (), status=404), "HTTP 404"),
+    (aiohttp.ClientResponseError(None, (), status=422), "HTTP 422"),
+    (aiohttp.ContentTypeError(None, (), status=200), "HTTP 200"),
+    (KeyError("token"), "KeyError"),
+])
+async def test_permanent_mint_error_fails_at_once(sandbox, minter, error, reason):
+    err = await _mint_failure(sandbox, minter, error)
+    assert err.message == f"could not mint a GitHub App token for o/r: {reason}"
+    assert len(minter.calls) == 1
+
+
+async def test_bad_private_key_fails_with_its_class_name(sandbox, monkeypatch):
+    # The real client: its constructor decodes the key, before any request.
+    import webhook_bridge.github_app as github_app
+    monkeypatch.setattr(activities, "GitHubAppClient", github_app.GitHubAppClient)
+    box = sandbox(_Result(_ok_stdout()))
+    with pytest.raises(ApplicationError, match=r"for o/r: Error$"):
+        await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert box.created_with == {}
+
+
+@pytest.mark.parametrize("missing", ["SWE_AGENT_APP_ID", "SWE_AGENT_APP_PRIVATE_KEY"])
+async def test_missing_app_env_fails_without_a_mint(sandbox, minter, monkeypatch, missing):
+    monkeypatch.delenv(missing)
+    err = await _mint_failure(sandbox, minter)
+    assert err.message.endswith("SWE_AGENT_APP_ID or SWE_AGENT_APP_PRIVATE_KEY is not set")
+    assert minter.calls == []
+
+
+@pytest.mark.parametrize("grant", [
+    {"repositories": ["r", "other"]},
+    {"permissions": {**activities._SANDBOX_TOKEN_PERMISSIONS, "workflows": "write"}},
+    {"permissions": {**activities._SANDBOX_TOKEN_PERMISSIONS, "contents": "read"}},
+])
+async def test_grant_other_than_asked_fails(sandbox, minter, grant):
+    err = await _mint_failure(sandbox, minter, minter.token_for("o/r", **grant))
+    assert err.message.endswith(": grant mismatch")
+
+
+async def test_minted_token_stays_out_of_logs(sandbox, minter, caplog):
+    sandbox(_Result(_ok_stdout()))
+    with caplog.at_level(logging.DEBUG):
+        await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert "sandbox token minted for o/r" in caplog.text
+    assert "expires_at=2026-10-11T13:00:00Z" in caplog.text
+    assert minter.issued[0] not in caplog.text
+    assert PAT not in caplog.text
+
+
+async def test_pr_url_from_sandbox_stdout_is_redacted(sandbox, minter):
+    minter.outcomes = [minter.token_for("o/r")]
+    minted = minter.outcomes[0].token
+    sandbox(_Result(_ok_stdout() + f"done {minted} {PAT}\n"))
+    result = await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert result["pr_url"] == "done *** ***"
+
+
+async def test_failed_run_logs_no_secret(sandbox, minter, monkeypatch, caplog):
+    app_key = "app-key-test-only-0123456789"
+    monkeypatch.setenv("SWE_AGENT_APP_PRIVATE_KEY", app_key)
+    minter.outcomes = [minter.token_for("o/r")]
+    minted = minter.outcomes[0].token
+    sandbox(_exit(1, stderr=f"push failed: {minted} {PAT} {TOKEN}"))
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError):
+        await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    for secret in (minted, PAT, TOKEN, app_key):
+        assert secret not in caplog.text
+
+
+async def test_run_failure_message_redacts_every_github_token(sandbox, minter):
+    stray = "ghu_" + "A" * 30  # token-shaped, known to nobody
+    minter.outcomes = [minter.token_for("o/r")]
+    minted = minter.outcomes[0].token
+    sandbox(_exit(1, stderr=f"push failed: {minted} {PAT} {TOKEN} {stray}"))
+    with pytest.raises(RuntimeError, match=r"sandbox run failed \(1\): push failed") as exc:
+        await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    for secret in (minted, PAT, TOKEN, stray):
+        assert secret not in str(exc.value)
+
+
+async def test_sandbox_create_failure_is_wrapped_and_redacted(sandbox, minter, monkeypatch):
+    class _FailingSandbox:
+        @staticmethod
+        async def create(**kwargs):
+            raise ValueError(f"bad envs: {kwargs['envs']}")
+
+    sandbox(_Result(_ok_stdout()))
+    monkeypatch.setattr(activities, "AsyncSandbox", _FailingSandbox)
+    with pytest.raises(RuntimeError, match="^sandbox create failed: ") as exc:
+        await activities.run_swe_agent_activity("o/r", "feat-x", None, "seat-a")
+    assert exc.value.__cause__ is None
+    assert exc.value.__suppress_context__
+    for secret in (minter.issued[0], TOKEN):
+        assert secret not in str(exc.value)
+
+
+def test_run_failure_redacts_the_workers_token(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", PAT)
+    with pytest.raises(RuntimeError) as exc:
+        activities._run(["false", f"https://x-access-token:{PAT}@github.com/o/r.git"])
+    assert PAT not in str(exc.value)
+    assert "x-access-token:***@" in str(exc.value)
+
+
+def test_command_budget_ends_before_the_token_expires():
+    # The token exists from the mint on; after it come sandbox create (bounded
+    # by e2b's request timeout) and the command. Mint retries come before it.
+    from e2b.connection_config import REQUEST_TIMEOUT
+    assert REQUEST_TIMEOUT + activities._COMMAND_TIMEOUT_SECONDS < 60 * 60
 
 
 # --- architect_stage_activity on seats (T035) -----------------------------------

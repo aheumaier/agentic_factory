@@ -7,9 +7,14 @@ the token in memory until shortly before its ~1h expiry. The token value
 is never logged. All calls go through aiohttp.ClientSession with an
 explicit timeout — never subprocess/gh CLI, never a blocking HTTP client
 (research.md's non-blocking-API-call decision).
+
+`mint_repo_token` (specs/013-sandbox-app-token) is the uncached sibling:
+one fresh token per call, narrowed to one repo and the given rights, for
+the Build sandbox.
 """
 import base64
 import time
+from dataclasses import dataclass, field
 
 import aiohttp
 import jwt
@@ -19,6 +24,16 @@ _JWT_TTL_SECONDS = 9 * 60  # stays under GitHub's 10 min ceiling
 _TOKEN_REFRESH_MARGIN_SECONDS = 5 * 60  # refresh before the ~1h token actually expires
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=10)
 _ACCEPT_HEADER = "application/vnd.github+json"
+
+
+@dataclass(frozen=True)
+class MintedToken:
+    """A narrowed installation token plus the grant GitHub reports for it."""
+
+    token: str = field(repr=False)  # secret: kept out of repr/str
+    repositories: list[str]
+    permissions: dict[str, str]
+    expires_at: str
 
 
 class GitHubAppClient:
@@ -64,6 +79,29 @@ class GitHubAppClient:
         token = data["token"]
         self._tokens[repo] = (token, time.time() + 3600 - _TOKEN_REFRESH_MARGIN_SECONDS)
         return token
+
+    async def mint_repo_token(self, repo: str, permissions: dict[str, str]) -> MintedToken:
+        """Mint a new token for `repo` only, with `permissions` only. Never cached, no retry."""
+        installation_id = await self._get_installation_id(repo)
+        headers = {
+            "Authorization": f"Bearer {self._mint_jwt()}",
+            "Accept": _ACCEPT_HEADER,
+        }
+        body = {"repositories": [repo.split("/", 1)[1]], "permissions": permissions}
+        async with self._session.post(
+            f"{_GITHUB_API}/app/installations/{installation_id}/access_tokens",
+            headers=headers,
+            json=body,
+            timeout=_REQUEST_TIMEOUT,
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+        return MintedToken(
+            token=data["token"],
+            repositories=[r["name"] for r in data.get("repositories", [])],
+            permissions=data.get("permissions", {}),
+            expires_at=data["expires_at"],
+        )
 
     async def _auth_headers(self, repo: str) -> dict[str, str]:
         token = await self._installation_token(repo)

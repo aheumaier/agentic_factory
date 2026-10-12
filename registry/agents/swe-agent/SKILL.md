@@ -30,7 +30,13 @@ Portable copy of `harness/swe-agent/SKILL.md` — the registry entry per
   `.github/workflows/swe-agent-build.yml`) run `agent.py` inside the
   `swe-agent-sandbox` E2B template (Execution Sandbox, §3.3). git and `gh`
   authenticate with a `GH_TOKEN` env var (a GitHub App installation token)
-  when it is set, else with the host's `gh` credential helper.
+  when it is set, else with the host's `gh` credential helper. On the
+  Temporal path that token is minted per sandbox (specs/013): for the target
+  repo only, with contents and pull requests write and metadata read, valid
+  1 h. The agent's PRs are authored by the App's bot, never by the operator,
+  and a failed mint fails the run instead of falling back to the worker's
+  own token. It has no workflows right, so a push that changes
+  `.github/workflows/` is rejected.
 - **Direct-to-Anthropic, not LiteLLM-routed.** `/speckit-implement` only
   exists as a Claude Code skill, so this agent is Claude-Agent-SDK/
   Anthropic-only by construction; LiteLLM routing (§3.4) and

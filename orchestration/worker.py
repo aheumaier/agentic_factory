@@ -91,4 +91,10 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    # Without a handler Python prints WARNING and up only, so activity.logger
+    # INFO lines (specs/013's "sandbox token minted" grant line) never reached
+    # the worker log. INFO is opened for our activities' logger alone, not for
+    # third-party libraries.
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("temporalio.activity").setLevel(logging.INFO)
     asyncio.run(main())
