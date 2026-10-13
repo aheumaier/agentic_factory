@@ -167,6 +167,12 @@ Use the same `jq … | bash .claude/hooks/policy.sh` pattern as V3.
   `Write` to `docs/../harness/a.py`, `./harness/a.py` and `Harness/a.py` each gives the
   same `[AF-SPEC]` deny as `harness/a.py`.
 
+**Checked on 2026-10-13 (T035)** against a copy of the 012 hooks in a disposable repo
+on `main` with no `tasks.md` (removed afterwards). The six Bash spellings each gave
+the `[AF-SECRET] Shell commands may not name .env …` message; `cat .env.example` and
+`cat .ENV.EXAMPLE` were allowed. Read `X/.Env` gave the file-tool message. The four
+`Write` paths gave the same `[AF-SPEC]` deny, byte for byte.
+
 ## V5: AF-SPEC during a rebase (FR-014)
 
 1. In a disposable worktree on a branch `NNN-x` that has `specs/NNN-*/tasks.md`, start

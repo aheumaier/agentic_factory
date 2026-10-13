@@ -156,25 +156,25 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Tests for User Story 2 (write first, must fail) ⚠️
 
-- [ ] T024 [US2] Path spelling tests in `tests/test_harness_hooks.py` (FR-008, R7, SC-004). `test_path_spellings_are_normalised`: parametrize over the contract's path table:
+- [X] T024 [US2] Path spelling tests in `tests/test_harness_hooks.py` (FR-008, R7, SC-004). `test_path_spellings_are_normalised`: parametrize over the contract's path table:
   - `harness/./x.py`, `pkg/../harness/x.py`, `./harness/x.py`, `harness//x.py`, `Harness/x.py` and `HARNESS/x.py` are guarded, so AF-SPEC denies them on `main`;
   - `harness/../pkg/x.py` and `harnessx/x.py` are not guarded;
   - `../../outside.py` (popping past the root) is outside the repo, so there is no decision.
   - Absolute only: `<root>/../<rootname>/harness/x.py` climbs out and back in, so it is guarded and denied on `main` (data-model "AF-SPEC path" step 2 runs on the whole path; T006 review, finding 5).
 
   Use `_edit(repo, rel)` with both a relative and an absolute `file_path`.
-- [ ] T025 [US2] Secret spelling tests in `tests/test_harness_hooks.py` (FR-007, FR-009, R6). Extend `_SECRET_DENIED` (:600) and `_SECRET_ALLOWED` (:617) only by adding rows; do not edit existing ones.
+- [X] T025 [US2] Secret spelling tests in `tests/test_harness_hooks.py` (FR-007, FR-009, R6). Extend `_SECRET_DENIED` (:600) and `_SECRET_ALLOWED` (:617) only by adding rows; do not edit existing ones.
   - Denied for Bash: `cat .ENV`, `cat .Env.Braintrust`, `x=$(cat .env)`, `` `cat .env` ``, `scp a@b:.env .`, `cp {.env,x}`, `echo a,.env`, `less (.env)`, `cat <.env`, `cat .env*`.
   - Denied for the file tools, because they share `SECRET_RE` (FR-009, contract "AF-SECRET, file tools"): Glob `pattern` `{.env,x}` and `x:.env`, and Grep `glob` `x,.env`. Each passes on the old regex (checked 2026-10-12), so the test fails before T030.
   - Allowed for Bash, Read, Grep and Glob: `.env.example` in each of those spellings, and `.environment`.
   - New `test_shell_secret_message_says_naming`: a Bash deny's first line is `MSG_SECRET_SHELL` (contains "naming") and matches the deny-format regex. A Read deny still uses `MSG_SECRET`.
-- [ ] T026 [P] [US2] swe-agent prompt tests in `tests/test_swe_agent_seat.py` (FR-011, R8). In `test_prompt_carries_resume_and_checkpoint_rules` (:322), replace `assert "git add -A && git commit" in prompt` with `# FR-011` and assert:
+- [X] T026 [P] [US2] swe-agent prompt tests in `tests/test_swe_agent_seat.py` (FR-011, R8). In `test_prompt_carries_resume_and_checkpoint_rules` (:322), replace `assert "git add -A && git commit" in prompt` with `# FR-011` and assert:
   - `"Do not commit: the harness commits your work."` in the whitespace-joined prompt;
   - `"list the checks you ran"` in the prompt;
   - `"git commit"` not in the prompt.
 
   Add `test_task_and_feedback_prompts_do_not_ask_to_commit`: `TASK_PROMPT` contains "list the checks you ran"; `FEEDBACK_PROMPT_SUFFIX` does not contain "committing".
-- [ ] T027 [US2] swe-agent PR-body tests in `tests/test_swe_agent_seat.py` (FR-011, R8). Reuse the module's existing fake `query` and `origin` fixtures, and follow the shape of `test_checkpoint_push_follows_branch_not_head`.
+- [X] T027 [US2] swe-agent PR-body tests in `tests/test_swe_agent_seat.py` (FR-011, R8). Reuse the module's existing fake `query` and `origin` fixtures, and follow the shape of `test_checkpoint_push_follows_branch_not_head`.
   - `test_pr_body_has_verification_notes_after_one_session`: one IMPLEMENT run whose last `ResultMessage.result` is "ran pytest: 3 passed". `.pr-body.md` ends with `\n\n## Agent verification notes\n\n~~~text\nran pytest: 3 passed\n~~~` (data-model "Verification notes", fenced per the T006 review).
   - `test_notes_go_to_a_comment_when_the_pr_exists`: `gh pr create` fails with "already exists". `gh pr comment <branch> --body-file <f>` runs, and `<f>`'s first line is `## Agent verification notes`. A failing `gh pr comment` does not fail the run (T006 review, finding 1).
   - `test_notes_are_fenced`: notes with `Fixes #1`, `@someone` and a `~~~` line. Both strings sit between the opening and the closing fence, and the `~~~` line became `~~\~` (T006 review, finding 9).
@@ -186,21 +186,21 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Implementation for User Story 2
 
-- [ ] T028 [US2] `rel_path` normalisation in `.claude/hooks/lib.sh:89` (FR-008, R7). Normalise lexically, as data-model "AF-SPEC path" says:
+- [X] T028 [US2] `rel_path` normalisation in `.claude/hooks/lib.sh:89` (FR-008, R7). Normalise lexically, as data-model "AF-SPEC path" says:
   - make the path absolute against ROOT, then work on the whole absolute path;
   - drop `.` and empty segments;
-  - each `..` pops one segment; a `..` with nothing left to pop means outside (return 1);
+  - each `..` pops one segment; a `..` at `/` stays at `/`, as the kernel reads it (amended 2026-10-13 by the implementation review; `test_dotdot_at_the_filesystem_root_stays_there`);
   - only then compare with `ROOT/`; no match means outside (return 1).
 
   No disk lookups and no symlink resolution. bash 3.2 only. Run `bash -n`. (AF-HARNESS prompt.)
-- [ ] T029 [US2] AF-SPEC case fold in `.claude/hooks/policy.sh` (FR-008, R7). Lower-case only the first path segment (`tr '[:upper:]' '[:lower:]'`) before matching `harness/`, `orchestration/` or `eval/`. T024 now passes. (AF-HARNESS prompt.)
-- [ ] T030 [US2] AF-SECRET in `.claude/hooks/policy.sh` (FR-007, FR-009, R6):
-  - Set `SECRET_RE` to ``(^|[[:space:]/'"=<`@{,:(])\.env(\.braintrust)?($|[[:space:];|&)'"<>*?[{`,])``. Use it for both the Bash check and the file-tool glob/pattern check, and keep the existing `is_secret_path` checks (:78-85).
+- [X] T029 [US2] AF-SPEC case fold in `.claude/hooks/policy.sh` (FR-008, R7). Lower-case only the first path segment (`tr '[:upper:]' '[:lower:]'`) before matching `harness/`, `orchestration/` or `eval/`. T024 now passes. (AF-HARNESS prompt.)
+- [X] T030 [US2] AF-SECRET in `.claude/hooks/policy.sh` (FR-007, FR-009, R6):
+  - Set `SECRET_RE` to ``(^|[[:space:]/'"=<>`@{,:(])\.env(\.braintrust)?($|[[:space:];|&)'"<>*?[{}`,])`` (`>` and `}` added 2026-10-13 by the implementation review). Use it for both the Bash check and the file-tool glob/pattern check, and keep the existing `is_secret_path` checks (:78-85).
   - Lower-case the Bash command before matching (:90).
   - Add `MSG_SECRET_SHELL` with the contract's "naming" text and deny Bash with it.
 
   T025 now passes. (AF-HARNESS prompt.)
-- [ ] T031 [P] [US2] swe-agent prompts in `harness/swe-agent/agent.py` (FR-011, R8):
+- [X] T031 [P] [US2] swe-agent prompts in `harness/swe-agent/agent.py` (FR-011, R8):
   - In `IMPLEMENT_PROMPT` (:38-58), replace the "Then commit your changes locally with `git add -A && git commit` …" sentence with: "Do not commit: the harness commits your work. In your final message, list the checks you ran and, for any that still fail, why. That message goes into the pull request for the human reviewer."
   - Append "In your final message, list the checks you ran and, for any that still fail, why." to `TASK_PROMPT` (:61).
   - Change `FEEDBACK_PROMPT_SUFFIX` (:73-78) to end "…before re-running verification."
@@ -208,7 +208,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - Change the `verify_new_commit` failure text to "the harness commits any change, so none was made".
 
   T026 now passes.
-- [ ] T032 [US2] swe-agent notes in `harness/swe-agent/agent.py` (FR-011, R8):
+- [X] T032 [US2] swe-agent notes in `harness/swe-agent/agent.py` (FR-011, R8):
   - `run_implement` (:340) keeps the last `ResultMessage.result` of its session.
   - `run_per_task` (:379) keeps each one under `### <task ID>`, in task order.
   - Pass the joined text to `push_and_open_pr`. It caps the text at 4000 chars (cut text ends with `\n\n… (truncated)`), fences it as data-model "Verification notes" says, and appends the section to `.pr-body.md`. When `gh pr create` says "already exists", it posts the same section with `gh pr comment <branch> --repo <repo> --body-file`, and a failure there is a stderr warning only.
@@ -216,9 +216,9 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - Do not carry notes across seats.
 
   T027 now passes, and so does `uv run --locked pytest tests/ -q`.
-- [ ] T033 [P] [US2] Docs for the swe-agent change: replace the "commit your changes" wording in `docs/40-sequence-swe-agent-runtime.md:47` and `:86` with "the harness commits", and mention the PR's "Agent verification notes". Update the prose in `registry/agents/swe-agent/SKILL.md` (and `harness/swe-agent/SKILL.md` if it says the model commits). This is prose only: do not touch `manifest.yaml` or `versions/`.
-- [ ] T034 [US2] Contract check (FR-006, FR-010, SC-005). Read `specs/012-dev-harness-followups/contracts/hook-interface.md` "Matching rules" next to T024, T025 and T030, and add any rule the tests pin that the contract does not state. Add the pointer line `> Amended by \`specs/012-dev-harness-followups/contracts/hook-interface.md\` (launcher, AF-HOOKS, gate time limit, stop steps 1-5, matching rules).` at the top of `specs/010-dev-harness-hardening/contracts/hook-interface.md`. Add a second pointer line under 010's `### \`py-check.sh stop\`` heading: `> Steps 1-5 are replaced by 012's contract, "\`stop\`" (a red-twice turn keeps its snapshot, FR-013).`
-- [ ] T035 [US2] Run quickstart V4 (secret and path spellings) by hand and note the result.
+- [X] T033 [P] [US2] Docs for the swe-agent change: replace the "commit your changes" wording in `docs/40-sequence-swe-agent-runtime.md:47` and `:86` with "the harness commits", and mention the PR's "Agent verification notes". Update the prose in `registry/agents/swe-agent/SKILL.md` (and `harness/swe-agent/SKILL.md` if it says the model commits). This is prose only: do not touch `manifest.yaml` or `versions/`.
+- [X] T034 [US2] Contract check (FR-006, FR-010, SC-005). Read `specs/012-dev-harness-followups/contracts/hook-interface.md` "Matching rules" next to T024, T025 and T030, and add any rule the tests pin that the contract does not state. Add the pointer line `> Amended by \`specs/012-dev-harness-followups/contracts/hook-interface.md\` (launcher, AF-HOOKS, gate time limit, stop steps 1-5, matching rules).` at the top of `specs/010-dev-harness-hardening/contracts/hook-interface.md`. Add a second pointer line under 010's `### \`py-check.sh stop\`` heading: `> Steps 1-5 are replaced by 012's contract, "\`stop\`" (a red-twice turn keeps its snapshot, FR-013).`
+- [X] T035 [US2] Run quickstart V4 (secret and path spellings) by hand and note the result.
 
 **Checkpoint**: US1 and US2 both pass. swe-agent's change is committed together with its docs (plan: agent.py, tests, docs/40 and SKILL.md in one commit).
 

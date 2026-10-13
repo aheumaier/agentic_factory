@@ -4,7 +4,7 @@
 # .claude/settings.json. Rules, evaluated in this order; the first deny wins,
 # and no match means no decision (exit 0, no stdout):
 #   AF-SECRET — Read/Grep/Glob of .env or .env.braintrust (any directory, any
-#               case, or a Grep/Glob glob that can name one), or a Bash command
+#               case, or a Grep/Glob glob that can name one, best effort), or a Bash command
 #               naming either. .env.example never matches.
 #   AF-SPEC   — Edit-family write under harness/, orchestration/ or eval/
 #               without a feature branch (NNN-slug or worktree-NNN-slug) that
@@ -48,6 +48,7 @@ ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || {
 }
 
 MSG_SECRET='[AF-SECRET] .env and .env.braintrust hold live credentials and are never read by the agent. To proceed: read .env.example for variable names and ask the operator for any value you need.'
+MSG_SECRET_SHELL='[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold live credentials, and reading, writing or copying them from the shell is refused. To proceed: use .env.example for variable names and ask the operator for any value you need. If the command only mentions the name as text (a commit message, a search string), write that text to a file and pass the file (git commit -F <file>, grep -f <file>), or ask the operator.'
 MSG_SPEC='[AF-SPEC] Code under harness/, orchestration/ and eval/ needs a planned feature: branch NNN-slug (or worktree-NNN-slug) with specs/NNN-*/tasks.md. To proceed: run /speckit-specify → /speckit-plan → /speckit-tasks and work on that feature'"'"'s branch, or have the operator relaunch with AF_SPEC_EXCEPTION="<reason>".'
 MSG_COMMIT='[AF-COMMIT] git commands that write commits (commit, revert, cherry-pick, merge, am, rebase, pull) require ruff (whole repo) and both pytest suites to be green. To proceed: fix the failures below, then run the command again.'
 MSG_TIMEOUT="[AF-COMMIT] The commit gate timed out after ${GATE_LIMIT}s, so this commit cannot be checked. To proceed: find the slow test (--durations=10), fix it, then commit again."
@@ -56,7 +57,11 @@ MSG_NO_RUNNER='[AF-COMMIT] The commit gate needs GNU timeout (timeout or gtimeou
 q="'"
 # A .env / .env.braintrust word: glob and brace characters may follow, so
 # `cat .env*` and `cat .env{,.braintrust}` match; a `.` may not (.env.example).
-SECRET_RE="(^|[[:space:]/${q}\"=<])\\.env(\\.braintrust)?(\$|[[:space:];|&)${q}\"<>*?[{])"
+# It may also sit after a backtick, `>`, `@`, `{`, `,`, `:` or `(`
+# (`` `cat .env` ``, `echo x >.env`, `cp {.env,x}`, `scp host:.env .`,
+# `less (.env)`) and before a backtick, `,` or `}` (`cat {x,.env}`).
+# Matched against the lower-cased command, so `.ENV` counts (012 R6).
+SECRET_RE="(^|[[:space:]/${q}\"=<>\`@{,:(])\\.env(\\.braintrust)?(\$|[[:space:];|&)${q}\"<>*?[{}\`,])"
 GIT_RE='(^|[^[:alnum:]_.-])git($|[^[:alnum:]_.-])'
 VERB_RE='(^|[^[:alnum:]_.-])(commit|revert|cherry-pick|merge|am|rebase|pull)($|[^[:alnum:]_.-])'
 PLAIN_RE='^[[:alnum:]_./:@+=-]+$'
@@ -75,16 +80,20 @@ deny() {
 
 # is_secret_path <path> [glob] — basename is .env or .env.braintrust, in any
 # directory and any case (macOS volumes are case-insensitive, and a `..` or
-# outside path still names the file). With "glob", a wildcard basename that can
-# name either (`.env*`, `.env{,.braintrust}`) matches too.
+# outside path still names the file). With "glob", the whole glob is matched
+# against SECRET_RE after `*` and `?` become spaces, so `.env*`, `*.env`,
+# `**/*.env`, `.env{,.braintrust}` and `{.env,pkg/x.py}` match too. Best
+# effort: a glob such as `[.]env` still gets through (012 contract).
 is_secret_path() {
-  local base="${1%/}"
-  base="$(printf '%s' "${base##*/}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  local p base
+  p="$(printf '%s' "${1%/}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  base="${p##*/}"
   [ -n "$base" ] || return 1
   case "$base" in
     .env | .env.braintrust) return 0 ;;
   esac
-  [ "${2:-}" = glob ] && [[ $base =~ $SECRET_RE ]]
+  p="${p//[*?]/ }"
+  [ "${2:-}" = glob ] && [[ $p =~ $SECRET_RE ]]
 }
 
 # verb_count <segment> — how many of the seven verb words the segment holds.
@@ -177,7 +186,9 @@ case "$tool" in
     ;;
   Bash)
     cmd="$(field .tool_input.command)"
-    [[ $cmd =~ $SECRET_RE ]] && deny "$MSG_SECRET"
+    # Lower-cased copy for the match only; AF-COMMIT below needs $cmd as is.
+    lc_cmd="$(printf '%s' "$cmd" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    [[ $lc_cmd =~ $SECRET_RE ]] && deny "$MSG_SECRET_SHELL"
     ;;
 esac
 
@@ -185,7 +196,9 @@ esac
 case "$tool" in
   Edit | Write | MultiEdit | NotebookEdit)
     rel="$(rel_path "$ROOT" "$(field '.tool_input.file_path // .tool_input.notebook_path')")"
-    case "$rel" in
+    # Case-insensitive volume: Harness/ is harness/. Only the first segment.
+    top="$(printf '%s' "${rel%%/*}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    case "$top${rel#"${rel%%/*}"}" in
       harness/* | orchestration/* | eval/*)
         n="$(feature_number "$ROOT")"
         found=""

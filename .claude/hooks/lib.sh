@@ -133,21 +133,33 @@ session_key() {
   printf '%s\n' "${k:-nosession}"
 }
 
-# rel_path <root> <path> — path relative to <root>, or nothing when it is
-# outside <root>. Plain string prefix (no realpath): /var vs /private/var on
+# rel_path <root> <path> — path relative to <root>, or nothing (status 1) when
+# it is outside <root>. Lexical only (data-model "AF-SPEC path"): a relative
+# path is put under <root>, then the whole path drops empty and `.` segments
+# and each `..` pops one; a `..` at `/` stays at `/`, as the kernel reads it.
+# Only then is it compared with <root>/. No realpath: /var vs /private/var on
 # macOS must compare the way Claude Code reports them.
 rel_path() {
-  local root="${1%/}" p="$2" rel
+  local root="${1%/}" p="$2" seg out=""
+  [ -n "$p" ] || return 1
   case "$p" in
-    "$root"/*) rel="${p#"$root"/}" ;;
-    /*) return 0 ;;
-    *) rel="${p#./}" ;;
+    /*) ;;
+    *) p="$root/$p" ;;
   esac
-  case "/$rel/" in
-    */../*) return 0 ;;
+  p="$p/"
+  while [ -n "$p" ]; do
+    seg="${p%%/*}"
+    p="${p#*/}"
+    case "$seg" in
+      "" | .) ;;
+      ..) out="${out%/*}" ;;
+      *) out="$out/$seg" ;;
+    esac
+  done
+  case "$out" in
+    "$root"/?*) printf '%s\n' "${out#"$root"/}" ;;
+    *) return 1 ;;
   esac
-  [ -n "$rel" ] && printf '%s\n' "$rel"
-  return 0
 }
 
 # python_fingerprint <root> — "<blob-sha>\t<path>" for every tracked or

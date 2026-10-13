@@ -132,15 +132,18 @@ AF-SPEC → AF-COMMIT. The first deny wins.
 
 ### AF-SECRET matching
 
-**File tools (Read, Grep, Glob)**: unchanged, now stated:
+**File tools (Read, Grep, Glob)**: now stated; the glob match changed 2026-10-13:
 
 - The path's basename is lower-cased (`LC_ALL=C tr`) and must equal `.env` or
   `.env.braintrust`.
 - The check runs in any directory.
 - Grep checks `path` and `glob`. Glob checks `path` and `pattern`.
-- A `glob` or `pattern` basename is also denied when it matches `SECRET_RE`, so
-  `.env*` and `.env{,.braintrust}` are denied. `SECRET_RE` is shared with Bash, so
-  the wider Bash delimiters below apply here too (benign: more glob spellings denied).
+- A `glob` or `pattern` is also denied when the whole lower-cased string, with each
+  `*` and `?` replaced by a space, matches `SECRET_RE`. So `.env*`,
+  `.env{,.braintrust}`, `*.env`, `**/*.env` and `{.env,pkg/x.py}` are denied, and
+  `**/*.env.example` passes. `SECRET_RE` is shared with Bash, so the wider Bash
+  delimiters below apply here too (benign: more glob spellings denied). A wildcard
+  inside the name (`[.]env`, `.en?`) still gets through: best effort, as in Bash.
 - Grep's `pattern` is never checked.
 
 **Bash**:
@@ -149,7 +152,7 @@ AF-SPEC → AF-COMMIT. The first deny wins.
    against:
 
    ```
-   (^|[[:space:]/'"=<`@{,:(])\.env(\.braintrust)?($|[[:space:];|&)'"<>*?[{`,])
+   (^|[[:space:]/'"=<>`@{,:(])\.env(\.braintrust)?($|[[:space:];|&)'"<>*?[{}`,])
    ```
 
 2. `.env.example` never matches: the `.` after `.env` is not in the trailing class.
@@ -161,8 +164,9 @@ AF-SPEC → AF-COMMIT. The first deny wins.
 
 1. If `PATH` is relative, prefix it with `ROOT/`.
 2. Split the whole absolute path on `/`. Drop empty and `.` segments. Each `..` pops
-   one segment off the path built so far. A `..` with nothing left to pop (above `/`)
-   returns *outside*. `ROOT` plays no part in this step.
+   one segment off the path built so far. A `..` at `/` stays at `/`, as the kernel
+   reads `/..`, so `/..<ROOT>/harness/a.py` is inside `ROOT`. `ROOT` plays no part in
+   this step.
 3. Rejoin. Only now compare with `ROOT`: if the result starts with `ROOT/`, return the
    rest. Otherwise return *outside* (empty). So `ROOT/../<rootname>/harness/a.py`
    returns `harness/a.py`.
@@ -243,10 +247,11 @@ target repo.
 |---|---|
 | source | `IMPLEMENT_PROMPT` path: `.result` of its last `ResultMessage`. Per-task path: `TASK_PROMPT` gains the same "list the checks you ran and why any still fail" sentence, and each task session's last `.result` is kept under a `### <task ID>` header, in task order. Not carried across seats (research R8) |
 | empty | `None` or whitespace only, or no model session ran (the all-done shortcut) → the section is left out |
-| size cap | 4 000 characters for the notes text, all task headers included, before the fence is added. Longer text is cut and ends with `\n\n… (truncated)` |
+| redaction | first, the value of each of `GH_TOKEN`, `GITHUB_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_PLATFORM_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `LITELLM_MASTER_KEY` that is set and non-empty is replaced with `***`. The model's shell sees these, and its final message could quote one (implementation review, 2026-10-13) |
+| size cap | 4 000 characters for the notes text, all task headers included, after the `~~~` escape below and before the fence is added. Longer text is cut and ends with `\n\n… (truncated)` |
 | format | the fixed header, then the notes inside a `~~~` fence: `## Agent verification notes\n\n~~~text\n<text>\n~~~`. Each `~~~` inside the text becomes `~~\~`, so no line of the text can close the fence. The fence keeps model text such as `Fixes #12` or `@someone` from being read as GitHub markup, and shows the reviewer which text is the model's (T006 review, 2026-10-13) |
 | placement, new PR | `gh pr create` succeeds: the section is appended to the PR body written to `.pr-body.md`, after `\n\n`. The body before the section is unchanged (the first `specs/*/spec.md`, as today) |
-| placement, PR exists | `gh pr create` fails with "already exists" (the architect stage's `ensure_target_pr_activity` opened the PR before Build, or this is build attempt 2 or 3): the same section is posted as a PR comment, `gh pr comment <branch> --repo <repo> --body-file <file>`. The comment's first line is the fixed header, and the webhook bridge's `parse` reads only the first non-empty line, so text below it is never read as a command. One comment per build attempt. A failed `gh pr comment` is printed to stderr as a warning and does not fail the run: the commits and the PR are already in place |
+| placement, PR exists | `gh pr create` fails with "already exists" (the architect stage's `ensure_target_pr_activity` opened the PR before Build, or this is build attempt 2 or 3): the same section is posted as a PR comment, `gh pr comment <PR URL> --body-file <file>`, with the URL from `gh pr list --head <branch>` (gh would read an all-digit branch such as `123` as PR #123; 2026-10-13). The comment's first line is the fixed header, and the webhook bridge's `parse` reads only the first non-empty line, so text below it is never read as a command. One comment per build attempt. A failed `gh pr comment` is printed to stderr as a warning and does not fail the run: the commits and the PR are already in place |
 
 ## Temporal marker guard (new; FR-022)
 

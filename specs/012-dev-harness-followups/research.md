@@ -258,21 +258,28 @@ bash 3.2, and a hand-written one would be far more code than the regex.
   - it matches `.env` or `.env.braintrust` in any directory;
   - for Grep, both `path` and the `glob` filter are checked;
   - for Glob, both `path` and `pattern` are checked;
-  - a `glob` or `pattern` basename is also denied when it matches `SECRET_RE` as a
-    wildcard, e.g. `.env*` or `.env{,.braintrust}`;
+  - a `glob` or `pattern` is also denied when the whole string, with `*` and `?`
+    read as spaces, matches `SECRET_RE`, e.g. `.env*`, `.env{,.braintrust}`,
+    `{.env,pkg/x.py}`, `*.env` or `**/*.env` (2026-10-13, implementation review:
+    a basename-only match missed a brace list with a `/` and a leading `*`; this
+    one code change makes the contract true). `**/*.env.example` stays allowed.
+    Spellings such as `[.]env`, `.en?` or `.e*` still pass, best effort as in
+    010 FR-016;
   - Grep's `pattern` is file content and is not checked.
 - **FR-007.** A new `MSG_SECRET_SHELL` is used for Bash:
-  `[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold live credentials, and reading, writing or copying them from the shell is refused. To proceed: use .env.example for variable names and ask the operator for any value you need.`
+  `[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold live credentials, and reading, writing or copying them from the shell is refused. To proceed: use .env.example for variable names and ask the operator for any value you need. If the command only mentions the name as text (a commit message, a search string), write that text to a file and pass the file (git commit -F <file>, grep -f <file>), or ask the operator.`
+  The last sentence was added 2026-10-13 after the implementation review.
   The Read/Grep/Glob message stays as it is.
 - **FR-009.**
   - The Bash command is lower-cased before matching (`LC_ALL=C tr`, as in
     `is_secret_path`).
-  - The leading delimiter class gets `` ` ``, `@`, `{`, `,`, `:` and `(`. The new
+  - The leading delimiter class gets `>`, `` ` ``, `@`, `{`, `,`, `:` and `(`. The new
     regex is
-    `(^|[[:space:]/'"=<`@{,:(])\.env(\.braintrust)?($|[[:space:];|&)'"<>*?[{`,])`.
-    The trailing class also gets `` ` `` and `,`, so `` `cat .env` `` and `{.env,x}`
-    match. The `:` covers `scp host:.env` and `git show HEAD:.env` (added 2026-10-12
-    after the architecture review).
+    `(^|[[:space:]/'"=<>`@{,:(])\.env(\.braintrust)?($|[[:space:];|&)'"<>*?[{}`,])`.
+    The trailing class also gets `` ` ``, `,` and `}`, so `` `cat .env` ``, `{.env,x}`
+    and `{x,.env}` match. The `:` covers `scp host:.env` and `git show HEAD:.env`
+    (added 2026-10-12 after the architecture review). The `>` (shell writes such as
+    `echo x >.env`) and the `}` were added 2026-10-13 after the implementation review.
   - `.env.example` still never matches, because a `.` is not in the trailing class.
   - `SECRET_RE` is shared with the file-tool `glob`/`pattern` check, so that check
     widens too. This is benign (more glob spellings denied) and keeps one regex.
@@ -295,7 +302,9 @@ be complete, and 010 FR-016 already calls this check best effort.
 - each `..` removes the segment before it. This runs on the whole absolute path, after
   a relative path is prefixed with the root, so `<root>/../<rootname>/harness/a.py`
   becomes `<root>/harness/a.py` and is guarded;
-- a `..` with no segment left before it (above `/`) makes the path outside;
+- a `..` with no segment left before it stays at `/`, as the kernel reads `/..`
+  (amended 2026-10-13 after the implementation review: returning *outside* there let
+  `/..<root>/harness/a.py` skip AF-SPEC);
 - only then is the result compared with the root prefix. A result that does not start
   with `<root>/` is outside the root.
 
@@ -350,6 +359,9 @@ because the R1 launcher keeps the `cwd`'s spelling (`--show-cdup`, not
   `/speckit-tasks`.
 - The stale "rerun with the prompt's commit instruction" wording in
   `verify_new_commit` becomes "the harness commits any change, so none was made".
+  When the tree is still dirty, the harness's own commit failed, and the message says
+  so instead: "the harness's commit failed (see the checkpoint stderr above), so the
+  work is uncommitted" (2026-10-13, implementation review).
 
 **Paths traced.**
 
@@ -373,7 +385,9 @@ because the R1 launcher keeps the `cwd`'s spelling (`--show-cdup`, not
   2 and 3 the PR exists too. `push_and_open_pr` then takes its "already exists" branch,
   and a `.pr-body.md` is never applied. So on the Temporal path the body alone would
   never carry the notes. The harness posts the section as a PR comment instead:
-  `gh pr comment <branch> --body-file <file>`, with the fixed header as its first line.
+  `gh pr comment <PR URL> --body-file <file>`, with the fixed header as its first line.
+  The URL comes from `gh pr list --head <branch>`, because gh reads an all-digit branch
+  name such as `123` as PR #123 (2026-10-13, implementation review).
   The webhook bridge (`orchestration/webhook_bridge/grammar.py` `parse`) reads only the
   first non-empty line of a comment, so the model's text below the header cannot be
   parsed as a run or gate command. A failed comment call is a warning on stderr, not a
@@ -711,3 +725,16 @@ applied as suggested:
   section. A lone alias or quoted verb was never gated in 010 either. The suggested
   rule (every segment with `git` must be exempt) would put the full 240 s gate on
   common safe lines such as `git merge --abort && git status` (2026-10-13).
+- **shell-reviewer, `.claude/hooks/lib.sh:163`, "the `ROOT` prefix is compared
+  case-sensitively, so `/TMP/r/harness/x.py` skips AF-SPEC".** Rejected. This is
+  finding 6 of the T006 review ("Rejected review findings (T006)" above): on a
+  case-sensitive volume (Linux, the E2B sandbox) a root in another case is a
+  different directory, folding it would judge that directory by this worktree's
+  branch, and `realpath` is a disk lookup that the "judged by its spelling" edge case
+  rules out. No new fact since then (2026-10-13).
+- **shell-reviewer, `.claude/hooks/policy.sh:29`, "no shellcheck gate on the hook
+  scripts".** Rejected for this round, as in the previous round (`policy.sh:27`
+  above). The shellcheck test is T048 and the `source-path` directives are T054
+  (Phase 6, FR-023, R17); T048 must fail first, so adding the gate now would break
+  that task's test-first step. The reviewer's own run found only cross-file false
+  positives, no real defect (2026-10-13).

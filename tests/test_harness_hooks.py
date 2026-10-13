@@ -651,12 +651,47 @@ _SECRET_DENIED = [
         "cat .env", "grep KEY .env", "cat ./.env", "cat .env*",
         "cat .env{,.braintrust}", "source .env", "x=$(<.env)",
     )],
+    # 012 FR-007/FR-009 (R6): any case, and the wider leading/trailing delimiters.
+    *[("Bash", {"command": c}) for c in (
+        "cat .ENV", "cat .Env.Braintrust", "x=$(cat .env)", "`cat .env`",
+        "scp a@b:.env .", "cp {.env,x}", "echo a,.env", "less (.env)", "cat <.env",
+    )],
+    # 012 FR-009: the file tools' glob/pattern check shares SECRET_RE.
+    ("Glob", {"pattern": "{.env,x}"}),
+    ("Glob", {"pattern": "x:.env"}),
+    ("Grep", {"pattern": "KEY", "glob": "x,.env"}),
+    # 012 FR-009: `.env` in the last brace slot, and shell redirection writes.
+    *[("Bash", {"command": c}) for c in (
+        "cat {x,.env}", "echo x >.env", "echo x >>.env", "echo x 2>.env",
+    )],
+    ("Grep", {"pattern": "KEY", "glob": "{x,.env}"}),
+    ("Glob", {"pattern": "{x,.env}"}),
+    # 012 FR-006: the whole glob is checked, not its basename, and a leading
+    # wildcard can stand for the dot's left side (ripgrep's `*` matches `.env`).
+    ("Grep", {"pattern": "KEY", "glob": "{.env,pkg/x.py}"}),
+    ("Grep", {"pattern": "KEY", "glob": "*.env"}),
+    ("Glob", {"pattern": "**/*.env"}),
 ]
 _SECRET_ALLOWED = [
     ("Read", {"file_path": "{repo}/.env.example"}),
     ("Glob", {"pattern": "**/.env.example"}),
     ("Grep", {"pattern": ".env", "glob": "*.py"}),
     *[("Bash", {"command": c}) for c in ("cat .env.example", "echo $HOME", "ls")],
+    # 012 FR-007/FR-009: .env.example and .environment in the new spellings.
+    *[("Bash", {"command": c}) for c in (
+        "cat .ENV.EXAMPLE", "x=$(cat .env.example)", "`cat .env.example`",
+        "scp a@b:.env.example .", "cp {.env.example,x}", "echo a,.env.example",
+        "less (.env.example)", "cat <.env.example", "cat .environment",
+    )],
+    ("Read", {"file_path": "{repo}/.ENV.EXAMPLE"}),
+    ("Read", {"file_path": "{repo}/.environment"}),
+    ("Grep", {"pattern": "KEY", "glob": "x,.env.example"}),
+    ("Grep", {"pattern": "KEY", "path": "{repo}/.environment"}),
+    ("Glob", {"pattern": "{.env.example,x}"}),
+    ("Glob", {"pattern": "x:.environment"}),
+    *[("Bash", {"command": c}) for c in ("echo x >.env.example", "cat {x,.env.example}")],
+    ("Glob", {"pattern": "{x,.env.example}"}),
+    ("Glob", {"pattern": "**/*.env.example"}),
 ]
 
 
@@ -682,6 +717,31 @@ def test_non_secret_reads_are_allowed(harness_repo, tool, tool_input):
     repo = harness_repo
 
     assert_no_decision(policy(repo, _tool_payload(repo, tool, tool_input)))
+
+
+MSG_SECRET_SHELL = (
+    "[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold "
+    "live credentials, and reading, writing or copying them from the shell is refused. "
+    "To proceed: use .env.example for variable names and ask the operator for any value "
+    "you need. If the command only mentions the name as text (a commit message, a search "
+    "string), write that text to a file and pass the file (git commit -F <file>, "
+    "grep -f <file>), or ask the operator."
+)  # 012 FR-007: the message also says what to do when the name is only text.
+
+
+def test_shell_secret_message_says_naming(harness_repo):
+    # 012 FR-007: a Bash deny names the act (naming the file from the shell);
+    # a Read deny keeps the 010 message.
+    repo = harness_repo
+
+    shell = assert_denied(policy(repo, bash("cat .env")), "AF-SECRET").splitlines()[0]
+    read = assert_denied(
+        policy(repo, _tool_payload(repo, "Read", {"file_path": "{repo}/.env"})), "AF-SECRET"
+    )
+
+    assert shell == MSG_SECRET_SHELL
+    assert "may not name" in shell
+    assert read.startswith("[AF-SECRET] .env and .env.braintrust hold live credentials")
 
 
 def _edit(repo: Path, rel: str, tool: str = "Edit") -> dict:
@@ -753,6 +813,58 @@ def test_no_hook_script_reads_claude_project_dir():
     # FR-002 (R2): only the launcher reads CLAUDE_PROJECT_DIR. A script that
     # reads it again would judge the launch worktree instead of its own.
     assert [p.name for p in HOOKS_DIR.glob("*.sh") if "CLAUDE_PROJECT_DIR" in p.read_text()] == []
+
+
+_GUARDED_SPELLINGS = [
+    "harness/./x.py", "pkg/../harness/x.py", "./harness/x.py", "harness//x.py",
+    "Harness/x.py", "HARNESS/x.py",
+]
+
+
+@pytest.mark.parametrize("spelling", ["absolute", "relative"])
+@pytest.mark.parametrize(
+    ("rel", "verdict"),
+    [
+        *[(rel, "guarded") for rel in _GUARDED_SPELLINGS],
+        ("harness/../pkg/x.py", "unguarded"),
+        ("harnessx/x.py", "unguarded"),
+        ("../../outside.py", "outside"),
+    ],
+)
+def test_path_spellings_are_normalised(harness_repo, rel, verdict, spelling):
+    # FR-008 (R7): `.`, `..`, doubled slashes and a capitalised first segment
+    # are resolved as text before the guarded-dir match. A string, not
+    # `repo / rel`: pathlib would already collapse `./` and `//`.
+    repo = harness_repo
+    switch(repo, "main")
+    path = f"{repo}/{rel}" if spelling == "absolute" else rel
+
+    result = policy(repo, {"tool_name": "Edit", "tool_input": {"file_path": path}})
+
+    if verdict == "guarded":
+        assert "branch: main" in assert_denied(result, "AF-SPEC").splitlines()[1:]
+    else:
+        assert_no_decision(result)
+
+
+def test_climbing_out_and_back_into_the_root_is_guarded(harness_repo):
+    # FR-008 (data-model "AF-SPEC path" step 2): `..` runs on the whole
+    # absolute path, so <root>/../<rootname>/harness/x.py lands inside ROOT.
+    repo = harness_repo
+    switch(repo, "main")
+    path = f"{repo}/../{repo.name}/harness/x.py"
+
+    assert_denied(policy(repo, {"tool_name": "Edit", "tool_input": {"file_path": path}}), "AF-SPEC")
+
+
+def test_dotdot_at_the_filesystem_root_stays_there(harness_repo):
+    # FR-008 (data-model "AF-SPEC path" step 2): the kernel reads `/..` as `/`,
+    # so /..<root>/harness/x.py writes the guarded file and must be judged.
+    repo = harness_repo
+    switch(repo, "main")
+    path = f"/..{repo}/harness/x.py"
+
+    assert_denied(policy(repo, {"tool_name": "Edit", "tool_input": {"file_path": path}}), "AF-SPEC")
 
 
 def test_paths_outside_the_repo_are_ignored(harness_repo, tmp_path_factory):

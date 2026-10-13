@@ -199,7 +199,7 @@ contains a `'`: the launcher prints its message inside a single-quoted `sh` stri
 | AF-HOOKS | repo root not resolved (`policy.sh`) | `[AF-HOOKS] policy.sh cannot resolve the repo root from <script path>, so this call cannot be checked. To proceed: check that the worktree directory exists and can be entered, or start a new Claude Code session in an existing worktree of this repo.` |
 | AF-HOOKS | `lib.sh` not loaded | `[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD -- .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git merge --abort first, or fix the conflict or syntax error in an editor), then retry.` |
 | AF-SECRET | Read, Grep, Glob | unchanged from 010 |
-| AF-SECRET | Bash (**new**, `MSG_SECRET_SHELL`) | `[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold live credentials, and reading, writing or copying them from the shell is refused. To proceed: use .env.example for variable names and ask the operator for any value you need.` |
+| AF-SECRET | Bash (**new**, `MSG_SECRET_SHELL`) | `[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold live credentials, and reading, writing or copying them from the shell is refused. To proceed: use .env.example for variable names and ask the operator for any value you need. If the command only mentions the name as text (a commit message, a search string), write that text to a file and pass the file (git commit -F <file>, grep -f <file>), or ask the operator.` |
 | AF-COMMIT | red run (verbs widened) | `[AF-COMMIT] git commands that write commits (commit, revert, cherry-pick, merge, am, rebase, pull) require ruff (whole repo) and both pytest suites to be green. To proceed: fix the failures below, then run the command again.` |
 | AF-COMMIT | timed out (**new**) | `[AF-COMMIT] The commit gate timed out after <N>s, so this commit cannot be checked. To proceed: find the slow test (--durations=10), fix it, then commit again.` |
 | AF-COMMIT | no timeout tool (**new**) | `[AF-COMMIT] The commit gate needs GNU timeout (timeout or gtimeout) to bound its run. To proceed: install it with brew install coreutils, then commit again.` |
@@ -209,17 +209,24 @@ contains a `'`: the launcher prints its message inside a single-quoted `sh` stri
 
 ### AF-SECRET, file tools (states shipped behaviour; FR-006)
 
-This is the ruling T042 item 7 asked for. The file-tool code does not change, but
-`SECRET_RE` is shared with the Bash check: the `glob`/`pattern` match below uses the
-same regex, so FR-009's wider delimiters widen it too. That is benign: a Glob pattern
-such as `{.env,x}` or `x:.env` is now denied as well. One regex stays, not two.
+This is the ruling T042 item 7 asked for. `SECRET_RE` is shared with the Bash
+check: the `glob`/`pattern` match below uses the same regex, so FR-009's wider
+delimiters widen it too. That is benign: a Glob pattern such as `{.env,x}`,
+`{x,.env}` or `x:.env` is now denied as well. One regex stays, not two. The only
+file-tool code change is the whole-glob match below (2026-10-13, after the
+implementation review).
 
 - The basename of the path is lower-cased, then compared with `.env` and
   `.env.braintrust`. So `.ENV` and `.Env.Braintrust` are denied.
 - The check applies in any directory, not only at the repo root.
 - Grep checks `path` and `glob`. Glob checks `path` and `pattern`. A `glob` or
-  `pattern` whose basename matches the secret pattern is denied, so `.env*` and
-  `.env{,.braintrust}` are denied.
+  `pattern` is lower-cased, its `*` and `?` become spaces, and then the **whole**
+  string (not only its basename) is matched against the secret pattern. So `.env*`,
+  `.env{,.braintrust}`, `*.env`, `**/*.env` and `{.env,pkg/x.py}` are denied, and
+  `**/*.env.example` passes.
+- Known gap: a glob is a small language of its own, so a spelling with a wildcard
+  inside the name (`[.]env`, `.en?`, `.e*`) still gets through. Like the Bash check,
+  this is a best-effort pattern match (010 FR-016), not a boundary.
 - Grep's search `pattern` is never checked.
 - `.env.example` passes in every spelling.
 
@@ -227,25 +234,32 @@ such as `{.env,x}` or `x:.env` is now denied as well. One regex stays, not two.
 
 - The command is lower-cased before matching, so `.ENV` is denied.
 - `.env` or `.env.braintrust` is matched when it follows the start of the command, a
-  space, or one of `/ ' " = <` and, **new**, `` ` @ { , : ( ``. The `:` covers
-  `scp host:.env` and `git show HEAD:.env`; the `(` covers `$(cat<.env)`-style
-  spellings. It must be followed by the
-  end of the command, a space, or one of `; | & ) ' " < > * ? [ { , ` and the
-  backtick. The exact regex is in data-model "AF-SECRET matching".
+  space, or one of `/ ' " = <` and, **new**, `` > ` @ { , : ( ``. The `>` covers
+  shell writes such as `echo x >.env`; the `:` covers `scp host:.env` and
+  `git show HEAD:.env`; the `(` covers `less (.env)`. It must be
+  followed by the end of the command, a space, or one of `; | & ) ' " < > * ? [ { } , `
+  and the backtick. The `}` covers `cat {x,.env}`. The exact regex is in data-model
+  "AF-SECRET matching".
 - `.env.example` passes: the `.` after `.env` is not a trailing delimiter.
+  `.environment` passes for the same reason (a letter is not a delimiter), in Bash
+  and in the file tools.
+- A Bash deny uses `MSG_SECRET_SHELL` ("may not name"); a file-tool deny keeps
+  010's `MSG_SECRET`.
 - This is a best-effort pattern match, not a security boundary (010 FR-016 stands).
 
 ### AF-SPEC path (FR-008, FR-014)
 
-- The path is made absolute against `ROOT`, then `.` and `..` segments are resolved
-  as text on the whole absolute path. Nothing is looked up on disk, so symlinks are
-  not followed.
+- The path is made absolute against `ROOT`, then empty (`//`) and `.` segments are
+  dropped and `..` segments are resolved as text on the whole absolute path. A `..` at
+  `/` stays at `/`, as the kernel reads it, so `/..<root>/harness/a.py` is guarded.
+  Nothing is looked up on disk, so symlinks are not followed.
 - Only the resolved path is compared with `ROOT`. A path that resolves outside `ROOT`
   is ignored, as in 010. `<root>/../<rootname>/harness/a.py` resolves inside `ROOT`
   and is guarded.
 - The first segment is lower-cased before the `harness/`, `orchestration/`, `eval/`
   match. `docs/../harness/a.py`, `./harness/a.py` and `Harness/a.py` all get the
-  verdict of `harness/a.py`.
+  verdict of `harness/a.py`. `harness/../pkg/a.py` and `harnessx/a.py` are not
+  guarded.
 - During a rebase (detached HEAD), the branch comes from `rebase-merge/head-name` or
   `rebase-apply/head-name`. Its `specs/NNN-*/tasks.md` counts when it is in the
   working tree or on the tip of the branch being rebased.
