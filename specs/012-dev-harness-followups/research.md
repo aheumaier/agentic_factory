@@ -211,10 +211,12 @@ behaviour, and it fails open.
      could undo it: git keeps the last of `--ff-only`, `--ff` and `--no-ff`, so
      `--ff-only --no-ff` makes a merge commit.
 
-   Both shapes also need exactly one of the seven verb words in the segment and none
-   of `$`, a backtick, `(`, `)`, `<` or `>`. Otherwise
+   Both shapes also need exactly one of the seven verb words in the segment and only
+   plain tokens (letters, digits and `_ . / : @ + = -`). Otherwise
    `git -C $(git${IFS}commit${IFS}-qam${IFS}x) rebase --abort` would pass, which
-   010's floor gates. `commit` is never exempt. `--skip` is never exempt: it resumes the replay and
+   010's floor gates, and so would `git pull --ff-only {--no-ff,}`, which the shell
+   expands to `--ff-only --no-ff` (a list of refused characters was replaced by this
+   allow-list on 2026-10-13, after quotes, braces and globs got through it). `commit` is never exempt. `--skip` is never exempt: it resumes the replay and
    writes the remaining commits.
 4. The `pull` checks are token checks, not word checks: 010's word boundary counts
    `-` as a word character, so the word `rebase` does not match inside `--rebase`.
@@ -676,3 +678,36 @@ applied as suggested:
   `session-context.sh` exits 0 on every path and never blocks. An empty ROOT there
   only skips the resume message, so a guard would add code with no change in what
   the operator sees (2026-10-13).
+- **shell-reviewer, `.claude/settings.json:25`, "the launcher's `p=$(cat)` has no
+  read limit and `bash` comes from PATH, so exit 127 fails open".** Rejected. The
+  launcher text is fixed word for word by `contracts/hook-interface.md` "Wiring" and
+  pinned by `test_every_hook_uses_the_launcher`, so changing it is a contract change
+  for the operator, not a fix-round edit. Every hook script needs bash, so with no
+  runnable `bash` no rule can run at all. The read is bounded by each entry's
+  `timeout`, and a timeout already fails open the same way. Recorded as a known gap in
+  the contract's "Wiring" section (2026-10-13).
+- **shell-reviewer, `.claude/hooks/lib.sh:93`, "rc 137 from an OOM kill is reported
+  as a timeout".** Rejected. `data-model.md` ("Gate run": step exit 124 or 137) and the
+  contract map both codes to "timed out", and `test_gate_timeout_denies_the_commit[137]`
+  pins that: its stub returns 137 at once, so the suggested `SECONDS >= gate_deadline`
+  guard would fail an existing test. The commit is denied either way, so nothing fails
+  open; only the hint in the message can mislead (2026-10-13).
+- **shell-reviewer, `.claude/hooks/policy.sh:27`, "no shellcheck gate on the hook
+  scripts".** Rejected for this round; the header part of the same finding was fixed
+  (line 27 now names both contracts). The shellcheck test is T048 and the
+  `source-path` directives are T054 (Phase 6, FR-023, R17). T048 must fail first on
+  the unfollowed `source`, so adding the directives now would break that later task's
+  test-first step (2026-10-13).
+- **shell-reviewer, `.claude/hooks/policy.sh:133`, "`branch.<name>.rebase` is ignored,
+  so `git pull --ff-only` can rebase ungated".** Rejected on evidence. In a scratch
+  pair of repos under git 2.51.0, with `branch.main.rebase=true`, `pull.rebase`
+  unset and the branches diverged, `git pull --ff-only` stopped with "Not possible to
+  fast-forward, aborting" (exit 128) and wrote no commit. `--ff-only` on the command
+  line wins over the branch's rebase setting, so FR-005's exemption holds as written
+  (2026-10-13).
+- **py-codereviewer, `.claude/hooks/policy.sh:144`, "the exemption ungates a compound
+  command with an alias or quoted verb, e.g. `git rebase --abort; git ci -m x`".**
+  Rejected as a best-effort gap, recorded next to FR-005 in the contract's AF-COMMIT
+  section. A lone alias or quoted verb was never gated in 010 either. The suggested
+  rule (every segment with `git` must be exempt) would put the full 240 s gate on
+  common safe lines such as `git merge --abort && git status` (2026-10-13).

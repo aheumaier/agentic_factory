@@ -206,8 +206,10 @@ Nothing is looked up on disk (no symlink resolution).
      `git -C ROOT config --get pull.rebase` is unset or `false`. The `pull.ff`
      config is not read.
 
-   Both shapes also need exactly one verb word in the segment and none of `$`, a
-   backtick, `(`, `)`, `<` or `>`. `commit` and `--skip` are never exempt.
+   Both shapes also need exactly one verb word in the segment, and every token
+   (split on blanks) must match `^[[:alnum:]_./:@+=-]+$`, so no quote, backslash,
+   `$`, backtick, `(`, `)`, `<`, `>`, brace, glob character or `~`. `commit` and
+   `--skip` are never exempt.
 4. **Verdict**: a command that passes step 1 is gated unless at least one segment
    has a verb word and every segment with a verb word is exempt.
 5. "Word" uses 010's boundary: `(^|[^[:alnum:]_.-])WORD($|[^[:alnum:]_.-])`. That

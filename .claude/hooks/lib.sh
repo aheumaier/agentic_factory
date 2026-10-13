@@ -13,6 +13,41 @@ CTX_WARN=120000
 
 failures=""
 
+# Gate time limit (012 FR-003, R3; data-model "Gate run"). Clamped to 240 s so
+# the gate ends before the 300 s PreToolUse/Stop hook timeouts in settings.json.
+GATE_LIMIT="${AF_GATE_LIMIT:-240}"
+_gate_limit_re='^[1-9][0-9]{0,2}$'
+if ! [[ $GATE_LIMIT =~ $_gate_limit_re ]] || [ "$GATE_LIMIT" -gt 240 ]; then
+  GATE_LIMIT=240
+fi
+gate_deadline=""
+gate_outcome=""
+gate_cmd=""
+
+# gate_runner — the GNU timeout command on PATH (timeout, else gtimeout), or
+# return 1 when there is none.
+gate_runner() {
+  local r
+  for r in timeout gtimeout; do
+    if command -v "$r" >/dev/null 2>&1; then
+      printf '%s\n' "$r"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# gate_start — arm one deadline for every following run_check. With no runner
+# the outcome is "no timeout tool" and run_check runs nothing (fail closed).
+gate_start() {
+  if gate_cmd="$(gate_runner)"; then
+    gate_deadline=$((SECONDS + GATE_LIMIT))
+  else
+    gate_outcome="no timeout tool"
+    failures="${failures}"$'\n'"=== gate FAILED ==="$'\n'"timeout or gtimeout is required (brew install coreutils)"$'\n'
+  fi
+}
+
 # require_tools <script-name> <tool>... — fail closed (exit 2) naming each
 # missing tool; any other non-zero exit would be a non-blocking hook error.
 require_tools() {
@@ -42,10 +77,25 @@ trim_pytest() {
 
 # run_check <label> <cmd> [args...] — run argv; on a non-zero exit append
 # "=== <label> FAILED ===" plus trimmed output to the global $failures.
+# After gate_start, each step runs under the runner with the time left, and an
+# exit of 124 or 137 ends the gate with the outcome "timed out".
 run_check() {
-  local label="$1" out
+  local label="$1" out rc left
   shift
-  if ! out="$("$@" 2>&1)"; then
+  [ -z "$gate_outcome" ] || return 0
+  if [ -n "$gate_deadline" ]; then
+    left=$((gate_deadline - SECONDS))
+    [ "$left" -ge 1 ] || left=1
+    set -- "$gate_cmd" --kill-after=5 "${left}s" "$@"
+  fi
+  out="$("$@" 2>&1)"
+  rc=$?
+  if [ -n "$gate_deadline" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; }; then
+    gate_outcome="timed out"
+    failures="${failures}"$'\n'"=== gate TIMED OUT after ${GATE_LIMIT}s ==="$'\n'"${label} timed out after ${GATE_LIMIT}s"$'\n'
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
     case "$label" in
       pytest*) out="$(printf '%s\n' "$out" | trim_pytest)" ;;
       *) out="$(printf '%s\n' "$out" | tail -n 40)" ;;

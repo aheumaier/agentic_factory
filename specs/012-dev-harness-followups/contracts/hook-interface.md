@@ -61,6 +61,11 @@ Known gaps, recorded, not fixed (2026-10-12):
   the payload's worktree holds. A session can edit those files from the shell, which
   010 FR-026 already leaves open, so this is no worse than 010. Checking that the
   toplevel shares this repo's git common dir is left for later.
+- **The launcher's own failure.** `p=$(cat)` has no read limit of its own (the
+  entry's `timeout` bounds it), and `bash` is found on `PATH`. If `bash` cannot run,
+  the PreToolUse entry exits 127, which Claude Code treats as a non-blocking error.
+  That is the same fail-open class as a hook timeout, and with no `bash` no hook rule
+  can run at all (2026-10-13, review finding).
 - **AF-HARNESS after a worktree move.** `permissions.ask` rules are anchored at the
   launch directory. After `EnterWorktree` or `cd` into another worktree, an Edit of
   that worktree's `.claude/hooks/**` may not prompt. Only a live run settles this
@@ -260,10 +265,15 @@ such as `{.env,x}` or `x:.env` is now denied as well. One regex stays, not two.
     `false`. Such a pull cannot create a commit. The `pull.ff` config alone exempts
     nothing.
 
-  Both shapes also need: exactly one of the seven verb words in the segment, and none
-  of `$`, a backtick, `(`, `)`, `<` or `>`. So a `-C` value cannot hide a command
-  substitution, and `--no-ff` or `--rebase` cannot ride along with `--ff-only` (git
-  keeps the last of `--ff-only`/`--ff`/`--no-ff`).
+  Both shapes also need: exactly one of the seven verb words in the segment, and only
+  plain tokens: each token holds nothing but letters, digits and `_ . / : @ + = -`.
+  So a `-C` value cannot hide a command substitution, and `--no-ff` or `--rebase`
+  cannot ride along with `--ff-only` (git keeps the last of `--ff-only`/`--ff`/`--no-ff`),
+  not even quoted or backslash-escaped, which the shell strips, nor brace- or
+  glob-expanded (`{--no-ff,}`, `[-]-no-ff`), which the shell expands (quotes and
+  backslash added 2026-10-13; the plain-token list replaced a list of refused
+  characters on 2026-10-13, after braces and globs got through it). A `-C ~/x` path
+  is therefore gated too, which errs toward gating.
 - `commit` is never exempt. `--skip` is never exempt: it resumes the replay and writes
   the remaining commits.
 - **What it judges.** The gate judges the tree **before** the command runs. On a red
@@ -271,6 +281,12 @@ such as `{.env,x}` or `x:.env` is now denied as well. One regex stays, not two.
   in a fix: make the tree green first (for example `git checkout -- <file>`). It does
   not vet the content a merge, rebase or pull brings in; the next Stop judges that
   (research R5).
+- **Best-effort gap.** A verb the floor cannot see, such as a git alias (`git ci`) or
+  a quoted verb (`git c''ommit`), was never gated in 010. Next to an exempt segment,
+  as in `git rebase --abort; git ci -m x`, the floor no longer catches it either,
+  because the only verb word sits in the exempt segment. Gating every command where
+  another `git` segment shares the line would put the full gate on
+  `git merge --abort && git status`, so this is left open (2026-10-13).
 
 | Command | Gated |
 |---|---|
@@ -289,6 +305,9 @@ such as `{.env,x}` or `x:.env` is now denied as well. One regex stays, not two.
 | `git pull --rebase` | yes |
 | `git pull --ff-only -r` | yes |
 | `git pull --ff-only --no-ff` | yes: a second option after `pull` |
+| `git pull --ff-only "--no-ff"` | yes: a quote in the segment |
+| `git pull --ff-only {--no-ff,}` | yes: braces are not plain; the shell expands them to `--no-ff` |
+| `git pull --ff-only [-]-no-ff` | yes: a glob is not plain |
 | `git pull --ff-only origin main` | no |
 | `git -C $(git${IFS}commit${IFS}-qam${IFS}x) rebase --abort` | yes: `$` and `(` in the segment |
 | `git rebase --abort 2>/dev/null` | yes: not an exact exempt segment |

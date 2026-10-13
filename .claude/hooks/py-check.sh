@@ -180,6 +180,9 @@ case "$MODE" in
       exit 0
     fi
     require_tools py-check.sh uv
+    # 012 FR-003: one deadline for lint and both suites; a timeout or a missing
+    # timeout tool lands in $failures and takes the red path below.
+    gate_start
 
     lint=()
     for p in "${changed[@]}"; do

@@ -11,17 +11,21 @@
 #               has specs/NNN-*/tasks.md. AF_SPEC_EXCEPTION (non-empty, set at
 #               launch) turns that deny into an allow, announced once per
 #               session; it never bypasses AF-SECRET or AF-COMMIT (FR-018).
-#   AF-COMMIT — a Bash command containing the words `git` and `commit` runs
-#               whole-repo ruff and both pytest suites; red denies the commit.
+#   AF-COMMIT — a Bash command containing the word `git` and one of commit,
+#               revert, cherry-pick, merge, am, rebase, pull runs whole-repo
+#               ruff and both pytest suites under the gate time limit; red, a
+#               timeout or no timeout tool denies it. Only `<verb> --abort|--quit`
+#               and a plain `git pull --ff-only` are exempt (012 R5).
 # A deny is a permissionDecision JSON on stdout with exit 0; a missing
-# jq/git/uv, or an [AF-HOOKS] repo root that cannot be resolved, is exit 2
-# (fail closed). AF-REGISTRY and AF-HARNESS are
+# jq/git/uv, or an [AF-HOOKS] case (repo root that cannot be resolved, empty
+# or invalid input), is exit 2 (fail closed). AF-REGISTRY and AF-HARNESS are
 # permissions.ask rules in settings.json, not checks here.
 #
 # Documented gaps: shell writes under guarded dirs are not pre-checked
 # (FR-013; the turn gate still judges them at Stop), and shell secret reads are
 # best-effort pattern matching, not a boundary (FR-016).
-# Contract: specs/010-dev-harness-hardening/contracts/hook-interface.md.
+# Contract: specs/010-dev-harness-hardening/contracts/hook-interface.md, amended
+# by specs/012-dev-harness-followups/contracts/hook-interface.md.
 set -uo pipefail
 
 if ! . "$(dirname "$0")/lib.sh"; then
@@ -33,6 +37,11 @@ INPUT=""
 # Bounded read: a hand run with an open, never-closing pipe must not hang.
 [ -t 0 ] || IFS= read -r -d '' -t 5 INPUT || true
 require_tools policy.sh jq git
+# FR-004: with no trusted input there is nothing to answer in JSON (AF-HOOKS).
+if ! jq -e 'type == "object" and (.tool_name | type == "string")' >/dev/null 2>&1 <<<"$INPUT"; then
+  echo '[AF-HOOKS] The repo policy hook got no valid input, so it cannot judge this call. To proceed: retry the call; if it repeats, restart the session and report it.' >&2
+  exit 2
+fi
 ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || {
   echo "[AF-HOOKS] policy.sh cannot resolve the repo root from $0, so this call cannot be checked. To proceed: check that the worktree directory exists and can be entered, or start a new Claude Code session in an existing worktree of this repo." >&2
   exit 2
@@ -40,14 +49,18 @@ ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || {
 
 MSG_SECRET='[AF-SECRET] .env and .env.braintrust hold live credentials and are never read by the agent. To proceed: read .env.example for variable names and ask the operator for any value you need.'
 MSG_SPEC='[AF-SPEC] Code under harness/, orchestration/ and eval/ needs a planned feature: branch NNN-slug (or worktree-NNN-slug) with specs/NNN-*/tasks.md. To proceed: run /speckit-specify → /speckit-plan → /speckit-tasks and work on that feature'"'"'s branch, or have the operator relaunch with AF_SPEC_EXCEPTION="<reason>".'
-MSG_COMMIT='[AF-COMMIT] Commits require ruff (whole repo) and both pytest suites to be green. To proceed: fix the failures below, then commit again.'
+MSG_COMMIT='[AF-COMMIT] git commands that write commits (commit, revert, cherry-pick, merge, am, rebase, pull) require ruff (whole repo) and both pytest suites to be green. To proceed: fix the failures below, then run the command again.'
+MSG_TIMEOUT="[AF-COMMIT] The commit gate timed out after ${GATE_LIMIT}s, so this commit cannot be checked. To proceed: find the slow test (--durations=10), fix it, then commit again."
+MSG_NO_RUNNER='[AF-COMMIT] The commit gate needs GNU timeout (timeout or gtimeout) to bound its run. To proceed: install it with brew install coreutils, then commit again.'
 
 q="'"
 # A .env / .env.braintrust word: glob and brace characters may follow, so
 # `cat .env*` and `cat .env{,.braintrust}` match; a `.` may not (.env.example).
 SECRET_RE="(^|[[:space:]/${q}\"=<])\\.env(\\.braintrust)?(\$|[[:space:];|&)${q}\"<>*?[{])"
 GIT_RE='(^|[^[:alnum:]_.-])git($|[^[:alnum:]_.-])'
-COMMIT_RE='(^|[^[:alnum:]_.-])commit($|[^[:alnum:]_.-])'
+VERB_RE='(^|[^[:alnum:]_.-])(commit|revert|cherry-pick|merge|am|rebase|pull)($|[^[:alnum:]_.-])'
+PLAIN_RE='^[[:alnum:]_./:@+=-]+$'
+nl=$'\n'
 
 field() {
   jq -r "$1 // empty" <<<"$INPUT" 2>/dev/null
@@ -72,6 +85,79 @@ is_secret_path() {
     .env | .env.braintrust) return 0 ;;
   esac
   [ "${2:-}" = glob ] && [[ $base =~ $SECRET_RE ]]
+}
+
+# verb_count <segment> — how many of the seven verb words the segment holds.
+verb_count() {
+  local s="$1" n=0
+  while [[ $s =~ $VERB_RE ]]; do
+    n=$((n + 1))
+    s="${s#*"${BASH_REMATCH[0]}"}"
+  done
+  printf '%s\n' "$n"
+}
+
+# exempt_segment <segment> — one of the two shapes that cannot write a commit
+# (012 R5): `git [-C p|-c k=v]… (rebase|cherry-pick|merge|am|revert)
+# (--abort|--quit)`, or `git pull` whose only option is --ff-only while
+# pull.rebase is unset or false. Plain tokens only, so the shell can neither
+# strip nor expand one into an option (PLAIN_RE: letters, digits and _ . / : @
+# + = - only; quotes, backslash, $ ` ( ) < >, braces, globs and ~ are refused).
+exempt_segment() {
+  local i=1 n tok ff=""
+  local -a t
+  [ "$(verb_count "$1")" -eq 1 ] || return 1
+  read -ra t <<<"$1"
+  for tok in "${t[@]}"; do
+    [[ $tok =~ $PLAIN_RE ]] || return 1
+  done
+  n=${#t[@]}
+  [ "$n" -ge 2 ] && [ "${t[0]}" = git ] || return 1
+  while [ "$i" -lt "$n" ] && { [ "${t[$i]}" = -C ] || [ "${t[$i]}" = -c ]; }; do
+    i=$((i + 2))
+  done
+  [ "$i" -lt "$n" ] || return 1
+  case "${t[$i]}" in
+    rebase | cherry-pick | merge | am | revert)
+      [ $((i + 2)) -eq "$n" ] || return 1
+      case "${t[$((i + 1))]}" in
+        --abort | --quit) return 0 ;;
+      esac
+      return 1
+      ;;
+    pull)
+      [ "$i" -eq 1 ] || return 1
+      for ((i = 2; i < n; i++)); do
+        tok="${t[$i]}"
+        case "$tok" in
+          --ff-only) ff=1 ;;
+          -*) return 1 ;;
+        esac
+      done
+      [ -n "$ff" ] || return 1
+      case "$(git -C "$ROOT" config --get pull.rebase 2>/dev/null)" in
+        "" | false) return 0 ;;
+      esac
+      return 1
+      ;;
+  esac
+  return 1
+}
+
+# commit_gated <command> — the 010 floor (the words git and a verb), unless
+# every segment that holds a verb is an exempt segment (012 FR-005, R5).
+commit_gated() {
+  local c="${1//\\$nl/}" seg
+  [[ $c =~ $GIT_RE ]] && [[ $c =~ $VERB_RE ]] || return 1
+  c="${c//&&/$nl}"
+  c="${c//||/$nl}"
+  c="${c//;/$nl}"
+  c="${c//|/$nl}"
+  while IFS= read -r seg; do
+    [[ $seg =~ $VERB_RE ]] || continue
+    exempt_segment "$seg" || return 0
+  done <<<"$c"
+  return 1
 }
 
 tool="$(field .tool_name)"
@@ -135,11 +221,16 @@ case "$tool" in
 esac
 
 # --- AF-COMMIT --------------------------------------------------------------
-if [ "$tool" = Bash ] && [[ $cmd =~ $GIT_RE ]] && [[ $cmd =~ $COMMIT_RE ]]; then
+if [ "$tool" = Bash ] && commit_gated "$cmd"; then
   require_tools policy.sh uv
+  gate_start
   run_check "ruff check ." \
     uv run --locked --directory "$ROOT" ruff check --output-format concise .
   run_suites "$ROOT"
+  case "$gate_outcome" in
+    "timed out") deny "${MSG_TIMEOUT}${failures}" ;;
+    "no timeout tool") deny "$MSG_NO_RUNNER" ;;
+  esac
   [ -z "$failures" ] || deny "${MSG_COMMIT}${failures}"
 fi
 exit 0

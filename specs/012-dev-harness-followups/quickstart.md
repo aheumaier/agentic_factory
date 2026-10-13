@@ -142,6 +142,13 @@ done
 **Expected:** the first eight print `[AF-COMMIT] The commit gate timed out …`. The
 last three print `allowed`. The table in the hook contract has more cases.
 
+**Checked on 2026-10-13 (T023)** in the 012 worktree, with `pull.rebase` unset. Both
+input checks gave `rc=2` and the `[AF-HOOKS] … got no valid input …` line. The first
+eight commands each printed `[AF-COMMIT] The commit gate timed out after 1s …` within
+1 to 2 s; the last three printed `allowed` at once. The red-tree repair step below was
+not run by hand: it needs a disposable worktree, and the red `[AF-COMMIT]` deny is
+pinned by the automated tests.
+
 **Repair on a red tree.** In a disposable worktree, break one `.py` file so the gate
 is red, then feed `git merge main` without `AF_GATE_LIMIT`. **Expected:** the main
 `[AF-COMMIT]` deny. This is by design (research R5): make the tree green first, for

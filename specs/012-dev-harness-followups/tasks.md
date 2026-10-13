@@ -87,19 +87,19 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Tests for User Story 1 (write first, must fail) ⚠️
 
-- [ ] T011 [US1] Gate time-limit tests in `tests/test_harness_hooks.py` (FR-003, R3):
+- [X] T011 [US1] Gate time-limit tests in `tests/test_harness_hooks.py` (FR-003, R3):
   - `test_gate_limit_is_clamped`: parametrize `AF_GATE_LIMIT` over unset, `"1000"`, `"abc"`, `"0"`, `"-5"`, `"30"`. Expect a first-step limit of `240`, 240, 240, 240, 240 and `30` respectively. Read it with `gate_limit(repo)` after a green `git commit` through `policy`.
   - `test_gate_steps_share_one_deadline`: every logged `<n>` is ≤ the limit; the second and third are ≤ the first; every one is ≥ 1.
   - `test_gate_timeout_denies_the_commit`: parametrize `timeout.rc` over 124 and 137. `assert_denied(..., "AF-COMMIT")`; the first line contains "timed out after". Do the same at Stop: exit 2 with "timed out" in stderr.
   - `test_gate_without_a_timeout_tool_denies`: use a `_path_without` that drops both `timeout` and `gtimeout`. The commit is denied and stderr names `brew install coreutils`. Stop exits 2 with the same text.
-- [ ] T012 [US1] Input-check tests in `tests/test_harness_hooks.py` (FR-004, R4). `test_policy_denies_empty_or_invalid_input`: parametrize the payload over `""`, `"{not json"`, `"[]"`, `'"x"'`, `{}` and `{"tool_name": 3}`. Each gives exit 2 and the AF-HOOKS "got no valid input" message from `contracts/hook-interface.md` (line ~171) on stderr. Also assert that `uv_calls(repo) == []`.
-- [ ] T013 [US1] Git-verb tests in `tests/test_harness_hooks.py` (FR-005, R5, SC-003), built from the command table in `contracts/hook-interface.md` "AF-COMMIT".
+- [X] T012 [US1] Input-check tests in `tests/test_harness_hooks.py` (FR-004, R4). `test_policy_denies_empty_or_invalid_input`: parametrize the payload over `""`, `"{not json"`, `"[]"`, `'"x"'`, `{}` and `{"tool_name": 3}`. Each gives exit 2 and the AF-HOOKS "got no valid input" message from `contracts/hook-interface.md` (line ~171) on stderr. Also assert that `uv_calls(repo) == []`.
+- [X] T013 [US1] Git-verb tests in `tests/test_harness_hooks.py` (FR-005, R5, SC-003), built from the command table in `contracts/hook-interface.md` "AF-COMMIT".
   - `test_commit_making_verbs_are_gated`: parametrize over every row the table marks "gated". This includes `git revert HEAD`, `git cherry-pick abc`, `git merge x`, `git am p.patch`, `git rebase main`, `git pull`, `git pull --rebase`, `git rebase --skip`, `git rebase --continue`, `git -c a=b merge x`, `git pull --ff-only; git commit`, `git pull --ff-only $(x)` and a backslash-newline-split `git com\\\nmit`. Each is `assert_denied(..., "AF-COMMIT")` with a red pytest stub.
   - `test_exempt_verbs_run_no_gate`: parametrize over every "exempt" row, including `git rebase --abort`, `git -C /x merge --quit`, `git cherry-pick --abort` and `git pull --ff-only` (with `pull.rebase` unset and with it set to `false`). For the "unset" case pass `env_extra={"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}`, so the developer's own git config cannot change the verdict (`run_hook` applies `env_extra` after `_clean_env`). Each gives `assert_no_decision` and `uv_calls == []`.
   - `test_pull_ff_only_is_gated_when_pull_rebase_is_set`: run `git(repo, "config", "pull.rebase", "true")`, then `git pull --ff-only` is gated.
   - `test_af_commit_message_names_the_verbs`: the deny's first line matches `^\[AF-COMMIT\] .+\. To proceed: .+$` and names `commit` and at least `merge`.
-- [ ] T014 [US1] Change `test_non_commit_commands_run_no_gate` in `tests/test_harness_hooks.py:767` only if a row now flips. Keep `git status`, `git log --grep=committee` and `echo gitcommit`. Add `git log --grep=merge` and `echo rebase` as plain-word rows that stay ungated (the word-boundary rule needs the word `git` and the verb as separate words, so `--grep=merge` must not match). If a row has to change, comment `# FR-005` on it.
-- [ ] T015 [US1] Launcher and settings tests in `tests/test_harness_hooks.py` (FR-001, R1):
+- [X] T014 [US1] Change `test_non_commit_commands_run_no_gate` in `tests/test_harness_hooks.py:767` only if a row now flips. Keep `git status`, `git log --grep=committee` and `echo gitcommit`. Add `echo rebase` as a plain-word row that stays ungated (no word `git`). `git log --grep=merge` is gated, not ungated: `=` is not a word character in 010's boundary, so it errs toward gating (`contracts/hook-interface.md` AF-COMMIT table), and its row belongs in `test_commit_making_verbs_are_gated` (T013). (Corrected 2026-10-13 to match the contract.) If a row has to change, comment `# FR-005` on it.
+- [X] T015 [US1] Launcher and settings tests in `tests/test_harness_hooks.py` (FR-001, R1):
   - Replace `test_settings_wire_every_hook` (:1167) and the `session-context` assertion in `test_settings_wire_context_continuity_and_cap` (:1180). Their `.endswith("py-check.sh stop")`-style checks no longer hold, so mark the change `# FR-001`.
   - New `test_every_hook_uses_the_launcher`, for each of PreToolUse→`policy.sh` (timeout 300), PostToolUse→`py-check.sh edit`, UserPromptSubmit→`py-check.sh turn-start`, Stop→`py-check.sh stop` (timeout 300) and SessionStart(`compact|clear`)→`session-context.sh`:
     - the command contains `git rev-parse --show-cdup` and no `--show-toplevel` (the root keeps the `cwd`'s spelling; 012 fix round), `"$CLAUDE_PROJECT_DIR"` and `bash "$r/.claude/hooks/<script>" <args>`;
@@ -107,16 +107,16 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
     - `sh -n -c <command>` exits 0;
     - `shellcheck -s sh -` on the command exits 0 (skip only that assertion if shellcheck is missing).
   - New `test_gate_limit_is_below_the_hook_timeouts`: `GATE_LIMIT` default (read `\$\{AF_GATE_LIMIT:-(\d+)\}` from `lib.sh`) + 10 < the PreToolUse and Stop `timeout` values.
-- [ ] T016 [US1] Launcher behaviour tests in `tests/test_harness_hooks.py` (FR-001, SC-001). They run the real launcher strings from `settings()` with `subprocess.run(["/bin/sh", "-c", cmd], input=payload, env=…)`. Use `test_launcher_finds_scripts` parametrized over:
+- [X] T016 [US1] Launcher behaviour tests in `tests/test_harness_hooks.py` (FR-001, SC-001). They run the real launcher strings from `settings()` with `subprocess.run(["/bin/sh", "-c", cmd], input=payload, env=…)`. Use `test_launcher_finds_scripts` parametrized over:
   - (a) the payload's `cwd` is a `harness_repo` and `CLAUDE_PROJECT_DIR` points to a deleted dir: the repo's hook runs (a policy deny for an Edit of `harness/x.py` on `main`);
   - (b) `cwd` is a non-repo tmp dir and `CLAUDE_PROJECT_DIR` is the repo: the repo's hook runs;
   - (c) neither has `.claude/hooks/<script>`: PreToolUse exits 2 with the AF-HOOKS "were not found" text on stderr; Stop, PostToolUse, UserPromptSubmit and SessionStart exit 0 with stdout `{"systemMessage":"[AF-HOOKS] …"}`, which is valid JSON;
   - (d) the payload's `cwd` is a symlink to a `harness_repo` (create one: `tmp_path` is already a physical path on macOS), the repo is on `main`, and the Edit's `file_path` is spelled through the symlink: AF-SPEC denies. A launcher built on `--show-toplevel` would give the physical root, and the edit would get no decision (012 fix round, 2026-10-13).
-- [ ] T017 [US1] Deny format for the stderr-only denies in `tests/test_harness_hooks.py` (data-model validation). Policy denies already get the format check through `assert_denied` (T009). In T012 and T016(c), also assert that `deny_line(result)` matches `^\[AF-[A-Z]+\] .+\. To proceed: .+$`. Then run the suite and confirm T011–T017 fail for the expected reasons, and nothing else fails.
+- [X] T017 [US1] Deny format for the stderr-only denies in `tests/test_harness_hooks.py` (data-model validation). Policy denies already get the format check through `assert_denied` (T009). In T012 and T016(c), also assert that `deny_line(result)` matches `^\[AF-[A-Z]+\] .+\. To proceed: .+$`. Then run the suite and confirm T011–T017 fail for the expected reasons, and nothing else fails.
 
 ### Implementation for User Story 1
 
-- [ ] T018 [US1] Gate runner in `.claude/hooks/lib.sh` (FR-003, R3; data-model "Gate run"):
+- [X] T018 [US1] Gate runner in `.claude/hooks/lib.sh` (FR-003, R3; data-model "Gate run"):
   - Add `GATE_LIMIT=${AF_GATE_LIMIT:-240}`. If it is not a positive integer, or is above 240, set it to 240.
   - Add a `gate_runner` function that echoes `timeout` or `gtimeout`, or returns 1 when neither exists.
   - Make `run_check` (:45) and `run_suites` (:59) share one deadline (`SECONDS` at gate start + GATE_LIMIT). Run each step as `<runner> --kill-after=5 <left>s <cmd>`, where `<left>` is the time left, at least 1.
@@ -125,16 +125,16 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - Keep `uv run --locked` in every command.
 
   Run `bash -n .claude/hooks/lib.sh`. (AF-HARNESS prompt.)
-- [ ] T019 [US1] Input check in `.claude/hooks/policy.sh` (FR-004, R4). Right after the bounded stdin read and before any rule, run `jq -e 'type == "object" and (.tool_name | type == "string")'` on the input. On failure, print the AF-HOOKS "got no valid input" message from the contract on stderr and `exit 2`. The order is: lib load → input check → AF-SECRET → AF-SPEC → AF-COMMIT. (AF-HARNESS prompt.)
-- [ ] T020 [US1] AF-COMMIT matching in `.claude/hooks/policy.sh` (FR-005, R5), replacing the commit match near :130-139:
+- [X] T019 [US1] Input check in `.claude/hooks/policy.sh` (FR-004, R4). Right after the bounded stdin read and before any rule, run `jq -e 'type == "object" and (.tool_name | type == "string")'` on the input. On failure, print the AF-HOOKS "got no valid input" message from the contract on stderr and `exit 2`. The order is: lib load → input check → AF-SECRET → AF-SPEC → AF-COMMIT. (AF-HARNESS prompt.)
+- [X] T020 [US1] AF-COMMIT matching in `.claude/hooks/policy.sh` (FR-005, R5), replacing the commit match near :130-139:
   - Floor: the word `git` plus one of commit, revert, cherry-pick, merge, am, rebase, pull, using the boundary `(^|[^[:alnum:]_.-])WORD($|[^[:alnum:]_.-])`, after joining backslash-newlines.
   - Split into segments on `;`, `&&`, `||`, `|` and newline. Exempt the command only if every segment that has a verb word is one of the two exempt shapes in R5: `git [-C p|-c k=v]… (rebase|cherry-pick|merge|am|revert) (--abort|--quit)`, or `git pull --ff-only` with `git -C "$ROOT" config --get pull.rebase` unset or `false`. Both shapes need exactly one verb word and none of `$`, a backtick, `(`, `)`, `<` or `>`.
   - `commit` and `--skip` are never exempt.
   - Widen `MSG_COMMIT` (:39) to the contract text that names the verbs.
   - Run the gate through T018's runner, and deny with the timed-out or no-runner outcome text.
   - bash 3.2 only: no `${x,,}`, no `mapfile`. (AF-HARNESS prompt.)
-- [ ] T021 [US1] Stop gate in `.claude/hooks/py-check.sh` (stop mode, :144-214). Run ruff and the suites through T018's runner (FR-003). A timed-out or no-runner outcome goes down the existing red path: exit 2 with the outcome, then "still RED" on the retry. Run `bash -n`. (AF-HARNESS prompt.) T011 and T012–T014 now pass.
-- [ ] T022 [US1] Launcher in `.claude/settings.json` (FR-001, R1). Replace each hook `command` with the one-line POSIX sh launcher from `contracts/hook-interface.md` "Launcher", joined with `;`:
+- [X] T021 [US1] Stop gate in `.claude/hooks/py-check.sh` (stop mode, :144-214). Run ruff and the suites through T018's runner (FR-003). A timed-out or no-runner outcome goes down the existing red path: exit 2 with the outcome, then "still RED" on the retry. Run `bash -n`. (AF-HARNESS prompt.) T011 and T012–T014 now pass.
+- [X] T022 [US1] Launcher in `.claude/settings.json` (FR-001, R1). Replace each hook `command` with the one-line POSIX sh launcher from `contracts/hook-interface.md` "Launcher", joined with `;`:
   `p=$(cat); d=$(printf '%s' "$p" | jq -r '.cwd // empty' 2>/dev/null); t=$(cd "${d:-.}" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd "./$c" && pwd); for r in "$t" "$CLAUDE_PROJECT_DIR"; do if [ -n "$r" ] && [ -f "$r/.claude/hooks/<script>" ]; then printf '%s' "$p" | bash "$r/.claude/hooks/<script>" <args>; exit $?; fi; done; <not-found>`
   - PreToolUse (`policy.sh`, timeout 300): not-found is `echo '<AF-HOOKS missing>' >&2; exit 2`.
   - Others: not-found is `echo '{"systemMessage":"<AF-HOOKS missing>"}'; exit 0`. The entries are PostToolUse `py-check.sh edit`, UserPromptSubmit `py-check.sh turn-start`, Stop `py-check.sh stop` (timeout 300) and SessionStart(`compact|clear`) `session-context.sh`.
@@ -142,7 +142,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - Leave `permissions` and `env` untouched.
 
   Validate with `jq . .claude/settings.json`. (AF-HARNESS prompt.) T015–T017 now pass.
-- [ ] T023 [US1] Run quickstart V3 (input check and git verbs with `AF_GATE_LIMIT=1`) by hand, as `specs/012-dev-harness-followups/quickstart.md` describes, and note the result. Then run the root suite: all of US1 is green.
+- [X] T023 [US1] Run quickstart V3 (input check and git verbs with `AF_GATE_LIMIT=1`) by hand, as `specs/012-dev-harness-followups/quickstart.md` describes, and note the result. Then run the root suite: all of US1 is green.
 
 **Checkpoint**: US1 is complete and testable on its own. This is the MVP. The live check (V1/V2) is in T058.
 
