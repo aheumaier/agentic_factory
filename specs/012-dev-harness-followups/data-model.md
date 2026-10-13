@@ -188,7 +188,8 @@ Nothing is looked up on disk (no symlink resolution).
 `tasks.md` is found when either:
 
 - the working tree has `ROOT/specs/<NNN>-*/tasks.md` (as in 010); or
-- the branch is known and
+- HEAD is detached (a rebase is in progress), the rebased branch is known from its
+  `head-name` file, and
   `git ls-tree -r --name-only refs/heads/<branch> -- specs/` lists a path matching
   `^specs/<NNN>-[^/]*/tasks\.md$`.
 

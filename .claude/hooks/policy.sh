@@ -8,7 +8,10 @@
 #               naming either. .env.example never matches.
 #   AF-SPEC   — Edit-family write under harness/, orchestration/ or eval/
 #               without a feature branch (NNN-slug or worktree-NNN-slug) that
-#               has specs/NNN-*/tasks.md. AF_SPEC_EXCEPTION (non-empty, set at
+#               has specs/NNN-*/tasks.md. During a rebase (HEAD detached), the
+#               branch comes from rebase-merge/ or rebase-apply/head-name, and
+#               tasks.md on that branch's tip also counts (012 FR-014).
+#               AF_SPEC_EXCEPTION (non-empty, set at
 #               launch) turns that deny into an allow, announced once per
 #               session; it never bypasses AF-SECRET or AF-COMMIT (FR-018).
 #   AF-COMMIT — a Bash command containing the word `git` and one of commit,
@@ -17,8 +20,8 @@
 #               timeout or no timeout tool denies it. Only `<verb> --abort|--quit`
 #               and a plain `git pull --ff-only` are exempt (012 R5).
 # A deny is a permissionDecision JSON on stdout with exit 0; a missing
-# jq/git/uv, or an [AF-HOOKS] case (repo root that cannot be resolved, empty
-# or invalid input), is exit 2 (fail closed). AF-REGISTRY and AF-HARNESS are
+# jq/git/uv, or an [AF-HOOKS] case (lib.sh that cannot be loaded, repo root
+# that cannot be resolved, empty or invalid input), is exit 2 (fail closed). AF-REGISTRY and AF-HARNESS are
 # permissions.ask rules in settings.json, not checks here.
 #
 # Documented gaps: shell writes under guarded dirs are not pre-checked
@@ -28,8 +31,9 @@
 # by specs/012-dev-harness-followups/contracts/hook-interface.md.
 set -uo pipefail
 
-if ! . "$(dirname "$0")/lib.sh"; then
-  echo "policy.sh: cannot load lib.sh" >&2
+# 012 FR-015: bash's own error is dropped so the deny line comes first.
+if ! . "$(dirname "$0")/lib.sh" 2>/dev/null; then
+  echo "[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD -- .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git merge --abort first, or fix the conflict or syntax error in an editor), then retry." >&2
   exit 2
 fi
 
@@ -206,6 +210,9 @@ case "$tool" in
           for t in "$ROOT/specs/$n"-*/tasks.md; do
             [ -f "$t" ] && found=1 && break
           done
+          # 012 FR-014: during a rebase, tasks.md may exist only on the branch
+          # tip (tip_tasks is empty on an attached branch).
+          [ -n "$found" ] || [ -z "$(tip_tasks "$ROOT")" ] || found=1
         fi
         if [ -z "$found" ]; then
           if [ -n "${AF_SPEC_EXCEPTION:-}" ]; then
@@ -220,7 +227,7 @@ case "$tool" in
             fi
             exit 0
           fi
-          branch="$(git -C "$ROOT" symbolic-ref --short -q HEAD 2>/dev/null)" || branch="(detached)"
+          branch="$(feature_branch "$ROOT")"
           if [ -n "$n" ]; then
             detail="specs/$n-*/tasks.md: not found"
           else

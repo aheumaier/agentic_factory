@@ -198,24 +198,71 @@ resolve_snapshot() {
   return 0
 }
 
+# feature_branch <root> — the checked-out branch. While a rebase is stopped
+# (HEAD detached), the branch in the first readable rebase-merge/head-name or
+# rebase-apply/head-name, without refs/heads/ (012 FR-014, R10). Nothing for
+# any other detached HEAD.
+feature_branch() {
+  local root="$1" b f state
+  if b="$(git -C "$root" symbolic-ref --short -q HEAD 2>/dev/null)"; then
+    printf '%s\n' "$b"
+    return 0
+  fi
+  for state in rebase-merge rebase-apply; do
+    f="$(git -C "$root" rev-parse --git-path "$state/head-name" 2>/dev/null)" || continue
+    case "$f" in
+      /*) ;;
+      *) f="$root/$f" ;;
+    esac
+    [ -f "$f" ] && [ -r "$f" ] || continue
+    b="$(head -n 1 "$f" 2>/dev/null)"
+    b="${b#refs/heads/}"
+    [ -n "$b" ] && printf '%s\n' "$b"
+    return 0
+  done
+  return 0
+}
+
 # feature_number <root> — NNN from a branch named NNN-slug or worktree-NNN-slug;
-# nothing for other branches or a detached HEAD.
+# nothing for other branches or a detached HEAD outside a rebase.
 feature_number() {
   local b re='^(worktree-)?([0-9]{3})-'
-  b="$(git -C "$1" symbolic-ref --short -q HEAD 2>/dev/null)" || return 0
+  b="$(feature_branch "$1")"
   if [[ $b =~ $re ]]; then
     printf '%s\n' "${BASH_REMATCH[2]}"
   fi
   return 0
 }
 
+# tip_tasks <root> — during a rebase (HEAD detached), the first C-sorted
+# specs/<NNN>-*/tasks.md committed on the rebased branch's tip, or nothing.
+# The worktree can predate the commit that added it (012 FR-014, R10). On an
+# attached branch only the working tree counts, as in 010.
+tip_tasks() {
+  local root="$1" b n
+  git -C "$root" symbolic-ref -q HEAD >/dev/null 2>&1 && return 0
+  b="$(feature_branch "$root")"
+  n="$(feature_number "$root")"
+  [ -n "$b" ] && [ -n "$n" ] || return 0
+  git -C "$root" ls-tree -r --name-only "refs/heads/$b" -- specs/ 2>/dev/null \
+    | grep -E "^specs/$n-[^/]*/tasks\.md\$" | LC_ALL=C sort | head -n 1
+  return 0
+}
+
 # feature_spec_dir <root> — first C-sorted specs/<NNN>-*/ (repo-relative,
-# trailing /) for the branch's feature number, or nothing.
+# trailing /) for the branch's feature number, else the dir of tip_tasks, or
+# nothing.
 feature_spec_dir() {
   local root="$1" n d
   n="$(feature_number "$root")"
   [ -n "$n" ] || return 0
-  for d in "$root/specs/$n"-*/; do
+  d="$(for d in "$root/specs/$n"-*/; do
     [ -d "$d" ] && printf '%s\n' "${d#"$root"/}"
-  done | LC_ALL=C sort | head -n 1
+  done | LC_ALL=C sort | head -n 1)"
+  if [ -z "$d" ]; then
+    d="$(tip_tasks "$root")"
+    d="${d%tasks.md}"
+  fi
+  [ -z "$d" ] || printf '%s\n' "$d"
+  return 0
 }

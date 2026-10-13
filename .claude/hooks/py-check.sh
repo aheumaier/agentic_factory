@@ -14,13 +14,18 @@
 #                            HEAD if none is usable), then ruff the changed .py
 #                            files and run both suites if anything changed, so
 #                            a turn can't end red. Edits made through any tool,
-#                            shell included, are in the diff.
+#                            shell included, are in the diff. The loop guard
+#                            (stop_hook_active) is read before the uv and
+#                            timeout-tool checks; a missing uv is a red run;
+#                            a second red keeps the snapshot for the next
+#                            turn (012 FR-012, FR-013).
 # Exit 2 feeds stderr back to Claude (PostToolUse) or blocks the stop (Stop).
 # State lives in $(git rev-parse --git-path claude-harness)/, per worktree.
 #
 # Both suites run together: orchestration/activities.py loads harness/*/agent.py
 # by path, so a harness edit can break the orchestration suite (and vice versa
-# for tests/). Contract: specs/010-dev-harness-hardening/contracts/hook-interface.md.
+# for tests/). Contract: specs/010-dev-harness-hardening/contracts/hook-interface.md,
+# amended by specs/012-dev-harness-followups/contracts/hook-interface.md.
 set -uo pipefail
 
 MODE="${1:-}"
@@ -65,12 +70,14 @@ context_warn() {
   # try/catch: one malformed entry must not abort the stream. Non-numeric fields
   # (jq's + would concatenate digit strings) and any error give "invalid", which
   # fails the integer check below, so the reading is unknown. No leading zeros:
-  # $(( )) would read them as octal.
+  # $(( )) would read them as octal. 012 FR-017: a compaction boundary gives
+  # "unknown" (silent, marker kept) until the next usage after it.
   n="$(tail -n 200 "$tp" 2>/dev/null | jq -R -r 'fromjson? | objects
-    | select(.type == "assistant" and (.isSidechain != true) and (try .message.usage catch null))
-    | try (.message.usage
+    | select((.type == "system" and .subtype == "compact_boundary")
+        or (.type == "assistant" and (.isSidechain != true) and (try .message.usage catch null)))
+    | if .type == "system" then "unknown" else try (.message.usage
         | [.input_tokens, .cache_read_input_tokens, .cache_creation_input_tokens]
-        | map(. // 0) | if all(type == "number") then add else "invalid" end) catch "invalid"' \
+        | map(. // 0) | if all(type == "number") then add else "invalid" end) catch "invalid" end' \
     2>/dev/null | tail -n 1)"
   [[ $n =~ $int_re ]] || return 0
 
@@ -109,6 +116,9 @@ case "$MODE" in
     command -v jq >/dev/null 2>&1 || exit 0
     sd="$(state_dir "$ROOT")" || exit 0
     key="$(session_key "$(jq -r '.session_id // empty' <<<"$INPUT" 2>/dev/null)")"
+    # 012 FR-016: markers older than 7 days, like stale snapshots, are dropped.
+    find "$sd" -maxdepth 1 \( -name 'ctx-*.level' -o -name 'exception-*.notified' \) \
+      -mmin +10080 -delete 2>/dev/null || true
     resolve_snapshot "$sd" "$key"
     snap="$sd/turn-$key.tsv"
     # FR-001: never retake on a mid-turn message; a pending snapshot stays.
@@ -179,10 +189,17 @@ case "$MODE" in
       rm -f "$snap"
       exit 0
     fi
-    require_tools py-check.sh uv
-    # 012 FR-003: one deadline for lint and both suites; a timeout or a missing
-    # timeout tool lands in $failures and takes the red path below.
-    gate_start
+    # 012 FR-012: read the loop guard before anything can turn the run red.
+    active="$(jq -r '.stop_hook_active // false' <<<"$INPUT" 2>/dev/null)"
+    # 012 FR-003, FR-012: one deadline for lint and both suites; a missing uv, a
+    # timeout or a missing timeout tool lands in $failures and takes the red
+    # path below (a set gate_outcome makes run_check run nothing).
+    if command -v uv >/dev/null 2>&1; then
+      gate_start
+    else
+      gate_outcome="uv missing"
+      failures="${failures}"$'\n'"=== uv FAILED ==="$'\n'"uv is required"$'\n'
+    fi
 
     lint=()
     for p in "${changed[@]}"; do
@@ -201,11 +218,12 @@ case "$MODE" in
       rm -f "$snap"
       exit 0
     fi
-    if [ "$(jq -r '.stop_hook_active // false' <<<"$INPUT")" = "true" ]; then
+    if [ "$active" = "true" ]; then
       # Already blocked once this turn; don't loop forever, tell the operator.
+      # 012 FR-013: keep the snapshot, so the next turn still judges this
+      # turn's changes.
       jq -n --arg m "ruff/pytest gate is still RED at end of turn:${failures}" \
         '{systemMessage: $m}'
-      rm -f "$snap"
       exit 0
     fi
     # Keep the snapshot so the retry is judged against the same baseline.

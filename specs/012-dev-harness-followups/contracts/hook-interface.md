@@ -185,7 +185,9 @@ undoes the adoption step FR-013 relies on.
 
 The fixed rule list becomes `AF-SPEC AF-SECRET AF-COMMIT AF-REGISTRY AF-HARNESS
 AF-HOOKS`. The feature number is found as in AF-SPEC, so a rebase shows the branch
-being rebased.
+being rebased. When the stopped worktree predates the spec dir, the next tasks are
+read from that branch's tip, and the spec dir line says
+`(on the tip of <branch> only: git show refs/heads/<branch>:<dir>tasks.md)`.
 
 ## Rule messages (amends 010 "Rule messages")
 

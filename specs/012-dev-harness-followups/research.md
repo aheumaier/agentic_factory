@@ -738,3 +738,21 @@ applied as suggested:
   (Phase 6, FR-023, R17); T048 must fail first, so adding the gate now would break
   that task's test-first step. The reviewer's own run found only cross-file false
   positives, no real defect (2026-10-13).
+
+## Rejected review findings (implementation)
+
+Review of T036-T045 (Phase 5, User Story 3), 2026-10-13.
+
+- **shell-reviewer, `.claude/hooks/py-check.sh:27`: "when lib.sh cannot be loaded,
+  `stop` exits 2 on every Stop".** Rejected. Lines 27-32 are unchanged 010 code;
+  T042 and T044 did not touch them. FR-015, the contract's "Common" section
+  (`contracts/hook-interface.md`) and `data-model.md` (AF-HOOKS) scope the
+  lib.sh load failure to the launcher and `policy.sh` only. The contract's Stop
+  step 3 already accepts the same kind of block for a missing `jq` or `git`.
+  Changing this is a contract change, not a fix-round repair. Follow-up candidate:
+  the reviewer's suggested guard read for `stop` mode.
+- **Not rejected, merged:** shell-reviewer `.claude/hooks/session-context.sh:56`
+  (spec dir from the tip is not on disk) and py-codereviewer
+  `.claude/hooks/session-context.sh:35` ("no tasks.md" while tasks.md is on the
+  tip) are the same bug. One fix covers both: the resume block reads the next
+  tasks from the branch tip and says so on the spec dir line.

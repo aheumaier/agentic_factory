@@ -138,6 +138,8 @@ Defined fully in `contracts/drift-conventions.md`.
 Example: 125k emits a `warn` notice. 140k is silent. 152k emits a `budget` notice.
 After compaction, 40k deletes the marker. 121k emits a `warn` notice again.
 
+> Amended by `specs/012-dev-harness-followups/data-model.md` (context warning after compaction, R13; replaces the "Re-arm likely lags compaction by one prompt" paragraph below).
+
 **Re-arm likely lags compaction by one prompt.** The first UserPromptSubmit after a
 compaction probably still sees the pre-compaction assistant entry as the last one,
 so it reads high, stays silent and leaves the marker alone. Re-arm happens on the

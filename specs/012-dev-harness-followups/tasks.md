@@ -238,22 +238,22 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Tests for User Story 3 (write first, must fail) ⚠️
 
-- [ ] T036 [US3] Change `test_missing_uv_fails_closed_only_where_uv_runs` in `tests/test_harness_hooks.py:437` (FR-012). Keep the edit-mode assertions. For the stop path, add `# FR-012`; the first `stop_no_uv()` after a change gives exit 2 with "uv is required", and a second call with `stop_hook_active: true` gives exit 0 with "still RED" in `systemMessage`. Also add a payload with `stop_hook_active: true` and no `uv`, which must not be blocked before the guard is read.
-- [ ] T037 [US3] Change `test_red_blocks_once_then_lets_go_with_a_notice` in `tests/test_harness_hooks.py:301` (FR-013). The last line becomes `assert snapshot(repo).exists()  # FR-013: a double red keeps the baseline`. Add `test_double_red_keeps_the_baseline_for_the_next_turn` (SC-006):
+- [X] T036 [US3] Change `test_missing_uv_fails_closed_only_where_uv_runs` in `tests/test_harness_hooks.py:437` (FR-012). Keep the edit-mode assertions. For the stop path, add `# FR-012`; the first `stop_no_uv()` after a change gives exit 2 with "uv is required", and a second call with `stop_hook_active: true` gives exit 0 with "still RED" in `systemMessage`. Also add a payload with `stop_hook_active: true` and no `uv`, which must not be blocked before the guard is read.
+- [X] T037 [US3] Change `test_red_blocks_once_then_lets_go_with_a_notice` in `tests/test_harness_hooks.py:301` (FR-013). The last line becomes `assert snapshot(repo).exists()  # FR-013: a double red keeps the baseline`. Add `test_double_red_keeps_the_baseline_for_the_next_turn` (SC-006):
   1. Red, then red again.
   2. `turn_start`.
   3. Make a docs-only change (`notes.md`) and set the stubs green.
   4. `stop` runs the gate (because the pkg change from turn 1 is still in the diff) and passes. The snapshot is then deleted.
 
   Add a variant where the stubs stay red: the docs-only turn still blocks once.
-- [ ] T038 [US3] Rebase tests in `tests/test_harness_hooks.py` (FR-014, R10):
+- [X] T038 [US3] Rebase tests in `tests/test_harness_hooks.py` (FR-014, R10):
   - `test_rebase_on_a_planned_branch_allows_guarded_edits`: on `042-x` with `specs/042-x/tasks.md` committed, fake a rebase in progress. Run `git checkout --detach`, then write `refs/heads/042-x` into the file at `git rev-parse --git-path rebase-merge/head-name`, creating the directory. A real `git rebase` with nothing to replay finishes at once and leaves no such file. `policy` on `_edit(repo, "harness/x.py")` gives `assert_no_decision`. Repeat with `rebase-apply/head-name`, written the same way.
   - `test_rebase_reads_tasks_from_the_branch_tip`: `tasks.md` exists only on the branch tip, not in the detached worktree. The edit is allowed.
   - `test_rebase_of_an_unplanned_branch_is_denied`: same, but with no tasks.md. AF-SPEC denies.
   - `test_session_context_names_the_branch_during_a_rebase`: `session_context(repo, "compact")` during the rebase names `042-x`, and its rule list contains `AF-HOOKS`. Update `_RULES` at :931 to include `"AF-HOOKS"` with `# FR-014`.
-- [ ] T039 [US3] Lib-load test in `tests/test_harness_hooks.py` (FR-015, R11). `test_policy_without_lib_names_the_recovery`: parametrize over lib.sh deleted and lib.sh with a syntax error (`echo 'if then' >> lib.sh`). `policy` exits 2 and stderr's first line equals the contract's AF-HOOKS "could not be loaded" text, which contains `git checkout HEAD -- .claude/hooks/lib.sh` and `git rebase --abort` (T006 review: `git checkout --` fails on an unmerged file). The existing `test_turn_start_and_session_context_never_fail[no-lib]` stays unchanged: those two hooks still exit 0.
-- [ ] T040 [US3] Prune test in `tests/test_harness_hooks.py` (FR-016, R12). `test_turn_start_prunes_stale_ctx_and_exception_files`: create `ctx-old.level` and `exception-old.notified` in `state_dir(repo)` and age them 8 days with `_age(path, 8 * DAY)`; also create a fresh `ctx-new.level`. After `turn_start`, the old two are gone and the fresh one remains. A read-only state dir must not make `turn_start` fail.
-- [ ] T041 [US3] Compaction tests in `tests/test_harness_hooks.py` (FR-017, R13). Use `write_transcript` with a dict entry `{"type": "system", "subtype": "compact_boundary"}`:
+- [X] T039 [US3] Lib-load test in `tests/test_harness_hooks.py` (FR-015, R11). `test_policy_without_lib_names_the_recovery`: parametrize over lib.sh deleted and lib.sh with a syntax error (`echo 'if then' >> lib.sh`). `policy` exits 2 and stderr's first line equals the contract's AF-HOOKS "could not be loaded" text, which contains `git checkout HEAD -- .claude/hooks/lib.sh` and `git rebase --abort` (T006 review: `git checkout --` fails on an unmerged file). The existing `test_turn_start_and_session_context_never_fail[no-lib]` stays unchanged: those two hooks still exit 0.
+- [X] T040 [US3] Prune test in `tests/test_harness_hooks.py` (FR-016, R12). `test_turn_start_prunes_stale_ctx_and_exception_files`: create `ctx-old.level` and `exception-old.notified` in `state_dir(repo)` and age them 8 days with `_age(path, 8 * DAY)`; also create a fresh `ctx-new.level`. After `turn_start`, the old two are gone and the fresh one remains. A read-only state dir must not make `turn_start` fail.
+- [X] T041 [US3] Compaction tests in `tests/test_harness_hooks.py` (FR-017, R13). Use `write_transcript` with a dict entry `{"type": "system", "subtype": "compact_boundary"}`:
   - `test_context_after_compaction_with_no_usage_is_silent`: a high usage (`_assistant(130000)`), then a boundary, then `_FILLER`. No warning, and `ctx_marker(repo)` is left untouched.
   - `test_context_after_compaction_rearms_on_low_usage`: a high usage warns once, then a boundary, then `_assistant(10000)`, then later `_assistant(125000)`. Warns again.
 
@@ -261,26 +261,27 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Implementation for User Story 3
 
-- [ ] T042 [US3] `.claude/hooks/py-check.sh` stop mode (FR-012, FR-013, R9):
+- [X] T042 [US3] `.claude/hooks/py-check.sh` stop mode (FR-012, FR-013, R9):
   - Read `stop_hook_active` before the `uv` check and the T018 runner check.
   - Replace `require_tools py-check.sh uv` (:178) with: if `uv` is missing, add `=== uv FAILED ===` and "uv is required" to the failures and take the normal red path.
   - In the `stop_hook_active` branch, remove `rm -f "$snap"` so a double red keeps the snapshot.
   - Edit mode keeps `require_tools uv` (:131).
 
   Run `bash -n`. (AF-HARNESS prompt.) T036 and T037 now pass.
-- [ ] T043 [US3] Rebase support in `.claude/hooks/lib.sh` and `.claude/hooks/policy.sh` (FR-014, R10):
+- [X] T043 [US3] Rebase support in `.claude/hooks/lib.sh` and `.claude/hooks/policy.sh` (FR-014, R10):
   - `feature_number` (:141): when HEAD is detached, fall back to the file at `git rev-parse --git-path rebase-merge/head-name`, then `rebase-apply/head-name`, and strip `refs/heads/`.
   - `feature_spec_dir` / AF-SPEC: also accept a tasks.md on the branch tip, using `git ls-tree -r --name-only "refs/heads/<branch>" -- specs/` filtered to `^specs/NNN-[^/]*/tasks\.md$`.
   - Add `AF-HOOKS` to the rule list in `.claude/hooks/session-context.sh`.
 
   Run `bash -n` on each. (AF-HARNESS prompt.) T038 now passes.
-- [ ] T044 [US3] Remaining hook changes:
+- [X] T044 [US3] Remaining hook changes:
   - `.claude/hooks/policy.sh:26-27` (FR-015): replace the "cannot load lib.sh" echo with the contract's AF-HOOKS "could not be loaded" message, and keep exit 2.
   - `py-check.sh` turn-start (FR-016, R12): run `find "$sd" -maxdepth 1 \( -name 'ctx-*.level' -o -name 'exception-*.notified' \) -mmin +10080 -delete 2>/dev/null || true` before the snapshot step.
   - The context warning's jq walk in `.claude/hooks/py-check.sh` (around :68) (FR-017, R13): reset the candidate to unknown at a `type=="system"` and `subtype=="compact_boundary"` entry. A non-sidechain assistant usage sets it to `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. If the candidate is unknown at the end, stay silent and leave the marker untouched.
 
   Run `bash -n`. (AF-HARNESS prompt.) T039–T041 now pass.
-- [ ] T045 [US3] Add the pointer line `> Amended by \`specs/012-dev-harness-followups/data-model.md\` (context warning after compaction, R13; replaces lines 141-145).` above line 141 of `specs/010-dev-harness-hardening/data-model.md`. Run quickstart V5 (rebase) by hand and note the result.
+- [ ] T045 [US3] Add the pointer line `> Amended by \`specs/012-dev-harness-followups/data-model.md\` (context warning after compaction, R13; replaces the "Re-arm likely lags compaction by one prompt" paragraph below).` above line 141 of `specs/010-dev-harness-hardening/data-model.md`. Run quickstart V5 (rebase) by hand and note the result.
+  - 2026-10-13: pointer line done. V5 not run yet. It needs a disposable worktree and its removal, which the implementing run excludes. An attempt in a disposable clone was refused by the session's worktree-isolation guard (running the hook from outside the worktree). The rebase path is covered by the `fake_rebase` tests and `test_branch_tip_tasks_count_only_during_a_rebase`. Tick this task once V5 has been run by hand and its result noted here.
 
 **Checkpoint**: US1–US3 all pass.
 

@@ -341,7 +341,42 @@ def test_red_blocks_once_then_lets_go_with_a_notice(harness_repo):
     second = stop(repo, active=True)
     assert second.returncode == 0
     assert "still RED" in json.loads(second.stdout)["systemMessage"]
+    assert snapshot(repo).exists()  # FR-013: a double red keeps the baseline
+
+
+def _double_red_then_docs_turn(repo: Path) -> int:
+    """Turn 1 ends red twice; turn 2 changes only notes.md. Returns pytest calls so far."""
+    turn_start(repo)
+    (repo / "pkg" / "clean.py").write_text("VALUE = 2\n")
+    set_stub(repo, "pytest", 1, "FAILED tests/test_x.py::test_a - boom\n")
+    assert stop(repo).returncode == 2
+    assert stop(repo, active=True).returncode == 0
+    turn_start(repo)
+    (repo / "notes.md").write_text("docs only\n")
+    return len(calls_for(repo, "pytest"))
+
+
+def test_double_red_keeps_the_baseline_for_the_next_turn(harness_repo):
+    # SC-006: turn 1's pkg change is still judged in turn 2.
+    repo = harness_repo
+    before = _double_red_then_docs_turn(repo)
+    set_stub(repo, "pytest", 0)
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert len(calls_for(repo, "pytest")) > before
     assert not snapshot(repo).exists()
+
+
+def test_double_red_still_blocks_a_docs_only_next_turn(harness_repo):
+    repo = harness_repo
+    _double_red_then_docs_turn(repo)
+
+    result = stop(repo)
+
+    assert result.returncode == 2
+    assert "test_a" in result.stderr
 
 
 def test_every_failing_test_id_survives_trimming(harness_repo):
@@ -473,8 +508,9 @@ def test_missing_uv_fails_closed_only_where_uv_runs(harness_repo, tmp_path_facto
         payload = {"tool_input": {"file_path": str(repo / name)}}
         return run_hook(repo, "py-check.sh", ["edit"], payload, path=path)
 
-    def stop_no_uv() -> subprocess.CompletedProcess:
-        return run_hook(repo, "py-check.sh", ["stop"], {"session_id": "s1"}, path=path)
+    def stop_no_uv(active: bool = False, session: str = "s1") -> subprocess.CompletedProcess:
+        payload = {"session_id": session, "stop_hook_active": active}
+        return run_hook(repo, "py-check.sh", ["stop"], payload, path=path)
 
     assert edit("notes.md").returncode == 0
     py = edit("pkg/clean.py")
@@ -489,6 +525,19 @@ def test_missing_uv_fails_closed_only_where_uv_runs(harness_repo, tmp_path_facto
     changed = stop_no_uv()
     assert changed.returncode == 2
     assert "uv is required" in changed.stderr
+    # FR-012: a missing uv is a red run, so the retry is let go with a notice.
+    retry = stop_no_uv(active=True)
+    assert retry.returncode == 0, retry.stderr
+    notice = json.loads(retry.stdout)["systemMessage"]
+    assert "still RED" in notice
+    assert "uv is required" in notice
+    # FR-012: the guard is read before the uv check, so even a first
+    # stop_hook_active payload is not blocked.
+    turn_start(repo, "s2")
+    (repo / "pkg" / "other.py").write_text("y = 1\n")
+    guarded = stop_no_uv(active=True, session="s2")
+    assert guarded.returncode == 0, guarded.stderr
+    assert "uv is required" in json.loads(guarded.stdout)["systemMessage"]
 
 
 def test_session_id_is_sanitised_into_the_state_dir(harness_repo):
@@ -1295,7 +1344,7 @@ def test_context_reads_only_the_transcript_tail(harness_repo, entries, warned):
 # US4: continuity context after /compact or /clear (T035, SC-009)
 # ---------------------------------------------------------------------------
 
-_RULES = ("AF-SPEC", "AF-SECRET", "AF-COMMIT", "AF-REGISTRY", "AF-HARNESS")
+_RULES = ("AF-SPEC", "AF-SECRET", "AF-COMMIT", "AF-REGISTRY", "AF-HARNESS", "AF-HOOKS")  # FR-014
 
 
 def session_context(repo: Path, source: str, **kwargs) -> str:
@@ -1718,3 +1767,204 @@ def test_settings_wire_context_continuity_and_cap(settings):
     budget = re.search(r"^CTX_BUDGET=(\d+)$", lib, re.MULTILINE)
     assert budget
     assert settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == budget.group(1)
+
+
+# ---------------------------------------------------------------------------
+# 012 US3: rebase (FR-014, R10), lib load (FR-015, R11), prune (FR-016, R12),
+# context after compaction (FR-017, R13)
+# ---------------------------------------------------------------------------
+
+
+def fake_rebase(repo: Path, branch: str, state: str = "rebase-merge", at: str = "HEAD") -> None:
+    """Detach at `at` and leave the head-name file a stopped rebase leaves.
+
+    A real `git rebase` with nothing to replay finishes at once and leaves no
+    such file, so the tests write it the way git does.
+    """
+    git(repo, "checkout", "-q", "--detach", at)
+    head_name = Path(git(repo, "rev-parse", "--git-path", f"{state}/head-name").strip())
+    head_name = head_name if head_name.is_absolute() else repo / head_name
+    head_name.parent.mkdir(parents=True, exist_ok=True)
+    head_name.write_text(f"refs/heads/{branch}\n")
+
+
+def _record(repo: Path, rel: str, message: str) -> None:
+    """Record only `rel`: the fixture's hooks are untracked and must survive a detach."""
+    git(repo, "add", "--", rel)
+    git(repo, "commit", "-q", "-m", message)
+
+
+@pytest.mark.parametrize("state", ["rebase-merge", "rebase-apply"])
+def test_rebase_on_a_planned_branch_allows_guarded_edits(harness_repo, state):
+    repo = harness_repo
+    switch(repo, "042-x", tasks=True)
+    _record(repo, "specs", "tasks")
+    fake_rebase(repo, "042-x", state)
+
+    assert_no_decision(policy(repo, _edit(repo, "harness/x.py")))
+
+
+def test_rebase_reads_tasks_from_the_branch_tip(harness_repo):
+    repo = harness_repo
+    switch(repo, "042-x", tasks=True)
+    _record(repo, "specs", "tasks")
+    fake_rebase(repo, "042-x", at="HEAD~1")
+    assert not (repo / "specs" / "042-x" / "tasks.md").exists()
+
+    assert_no_decision(policy(repo, _edit(repo, "harness/x.py")))
+    # The resume block reads the next tasks from the tip, not "no tasks.md".
+    ctx = session_context(repo, "compact")
+    assert "- spec dir: specs/042-x/ (on the tip of 042-x only" in ctx
+    assert "\n  - [ ] T001 x" in ctx
+    assert "no tasks.md" not in ctx
+
+
+def test_rebase_resume_block_follows_the_tip_tasks_dir(harness_repo):
+    """FR-014: the disk has specs/042-a/ (no tasks.md), the tip has specs/042-b/tasks.md.
+
+    policy.sh allows the edit from the tip, so the resume block must read the
+    same file, not report "no tasks.md" for the dir on disk.
+    """
+    repo = harness_repo
+    switch(repo, "042-x")
+    (repo / "specs" / "042-a").mkdir(parents=True)
+    (repo / "specs" / "042-a" / "spec.md").write_text("spec\n")
+    _record(repo, "specs", "spec")
+    (repo / "specs" / "042-b").mkdir()
+    (repo / "specs" / "042-b" / "tasks.md").write_text("- [ ] T001 x\n")
+    _record(repo, "specs", "tasks")
+    fake_rebase(repo, "042-x", at="HEAD~1")
+    assert not (repo / "specs" / "042-b").exists()
+
+    assert_no_decision(policy(repo, _edit(repo, "harness/x.py")))
+    ctx = session_context(repo, "compact")
+    assert (
+        "- spec dir: specs/042-b/ (on the tip of 042-x only:"
+        " git show refs/heads/042-x:specs/042-b/tasks.md)"
+    ) in ctx
+    assert "\n  - [ ] T001 x" in ctx
+    assert "no tasks.md" not in ctx
+
+
+def test_branch_tip_tasks_count_only_during_a_rebase(harness_repo):
+    """FR-014 is scoped to a rebase: an attached branch needs tasks.md on disk."""
+    repo = harness_repo
+    switch(repo, "042-x", tasks=True)
+    _record(repo, "specs", "tasks")
+    (repo / "specs" / "042-x" / "tasks.md").unlink()
+    (repo / "specs" / "042-x").rmdir()
+
+    assert_denied(policy(repo, _edit(repo, "harness/x.py")), "AF-SPEC")
+    assert session_context(repo, "compact") == ""
+
+
+def test_rebase_of_an_unplanned_branch_is_denied(harness_repo):
+    repo = harness_repo
+    switch(repo, "042-x")
+    (repo / "notes.md").write_text("no plan\n")
+    _record(repo, "notes.md", "no tasks")
+    fake_rebase(repo, "042-x", at="HEAD~1")
+
+    reason = assert_denied(policy(repo, _edit(repo, "harness/x.py")), "AF-SPEC")
+    assert "branch: 042-x" in reason
+
+
+def test_session_context_names_the_branch_during_a_rebase(harness_repo):
+    repo = harness_repo
+    feature(repo, "042-x", _TASKS)
+    fake_rebase(repo, "042-x")
+
+    ctx = session_context(repo, "compact")
+
+    assert "- branch: 042-x\n" in ctx
+    assert "AF-HOOKS" in ctx
+
+
+_AF_HOOKS_LIB = (
+    "[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is"
+    " refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD --"
+    " .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git"
+    " merge --abort first, or fix the conflict or syntax error in an editor), then retry."
+)
+
+
+@pytest.mark.parametrize("case", ["deleted", "syntax-error"])
+def test_policy_without_lib_names_the_recovery(harness_repo, case):
+    repo = harness_repo
+    lib = repo / ".claude" / "hooks" / "lib.sh"
+    if case == "deleted":
+        lib.unlink()
+    else:
+        with lib.open("a") as f:
+            f.write("if then\n")
+
+    result = policy(repo, bash("git status"))
+
+    assert result.returncode == 2
+    assert deny_line(result) == _AF_HOOKS_LIB
+    assert DENY_FORMAT.match(_AF_HOOKS_LIB)
+
+
+def test_turn_start_prunes_stale_ctx_and_exception_files(harness_repo):
+    repo = harness_repo
+    sd = state_dir(repo)
+    sd.mkdir(parents=True, exist_ok=True)
+    old = [sd / "ctx-old.level", sd / "exception-old.notified"]
+    for f in old:
+        f.write_text("warn\n")
+        _age(f, 8 * DAY)
+    fresh = sd / "ctx-new.level"
+    fresh.write_text("warn\n")
+
+    assert turn_start(repo).returncode == 0
+
+    assert not any(f.exists() for f in old)
+    assert fresh.exists()
+
+
+@_NEEDS_DIR_PERMISSIONS
+def test_turn_start_survives_a_read_only_state_dir(harness_repo):
+    repo = harness_repo
+    sd = state_dir(repo)
+    sd.mkdir(parents=True, exist_ok=True)
+    stale = sd / "ctx-old.level"
+    stale.write_text("warn\n")
+    _age(stale, 8 * DAY)
+    sd.chmod(0o555)
+    try:
+        result = turn_start(repo)
+    finally:
+        sd.chmod(0o755)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    # FR-016: the prune ran, could not delete, and stayed quiet about it.
+    assert stale.exists()
+    assert result.stderr == ""
+
+
+_BOUNDARY = {"type": "system", "subtype": "compact_boundary"}
+
+
+def test_context_after_compaction_with_no_usage_is_silent(harness_repo):
+    repo = harness_repo
+    t = repo.parent / "t.jsonl"
+
+    assert ctx_start(repo, write_transcript(t, [130_000, _BOUNDARY, _FILLER])) is None
+    assert not ctx_marker(repo).exists()
+
+    # An unknown reading leaves an existing marker as it is, too.
+    assert ctx_start(repo, write_transcript(t, [125_000])) is not None
+    assert ctx_start(repo, write_transcript(t, [10_000, _BOUNDARY, _FILLER])) is None
+    assert ctx_marker(repo).read_text().strip() == "warn"
+
+
+def test_context_after_compaction_rearms_on_low_usage(harness_repo):
+    repo = harness_repo
+    t = repo.parent / "t.jsonl"
+
+    assert ctx_start(repo, write_transcript(t, [125_000])) is not None
+    assert ctx_start(repo, write_transcript(t, [125_000, _BOUNDARY, 10_000])) is None
+    assert not ctx_marker(repo).exists()
+    again = ctx_start(repo, write_transcript(t, [125_000, _BOUNDARY, 10_000, 125_000]))
+    assert again is not None
