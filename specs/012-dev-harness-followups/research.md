@@ -61,7 +61,9 @@ every hook entry apart from the script name and mode. It works like this:
 
 1. It reads the payload once (`p=$(cat)`) and passes it on to the script on stdin.
 2. It takes the worktree from the payload's `cwd` (`jq -r '.cwd // empty'`, or `pwd`
-   when jq is missing or the field is empty) and runs `git rev-parse --show-toplevel` there.
+   when jq is missing or the field is empty) and climbs to its toplevel with
+   `git rev-parse --show-cdup`, `cd` and `pwd`. Unlike `--show-toplevel`, this keeps the
+   `cwd`'s spelling, symlinks included, so `ROOT` still compares with `file_path` as text.
 3. It runs `<toplevel>/.claude/hooks/<script>` if that file exists. If not, it runs
    `$CLAUDE_PROJECT_DIR/.claude/hooks/<script>` if that one exists.
 4. If neither exists:
@@ -288,8 +290,15 @@ be complete, and 010 FR-016 already calls this check best effort.
 **Decision.** `rel_path` normalises the path lexically before the prefix match:
 
 - `.` segments are dropped;
-- each `..` removes the segment before it;
-- if a `..` would climb above the root, the path counts as outside the root.
+- each `..` removes the segment before it. This runs on the whole absolute path, after
+  a relative path is prefixed with the root, so `<root>/../<rootname>/harness/a.py`
+  becomes `<root>/harness/a.py` and is guarded;
+- a `..` with no segment left before it (above `/`) makes the path outside;
+- only then is the result compared with the root prefix. A result that does not start
+  with `<root>/` is outside the root.
+
+This matches data-model "AF-SPEC path", which is the normative rule (T006 review,
+2026-10-13).
 
 AF-SPEC then lower-cases the first segment of the relative path before matching
 `harness/*`, `orchestration/*` or `eval/*`. Nothing is looked up on disk: no
@@ -297,7 +306,9 @@ AF-SPEC then lower-cases the first segment of the relative path before matching
 spec's edge case says.
 
 **Rationale.** It closes the three spellings named in FR-008 and stays inside bash
-3.2 string handling. The `/var` vs `/private/var` note in `rel_path` still holds.
+3.2 string handling. The `/var` vs `/private/var` note in `rel_path` still holds,
+because the R1 launcher keeps the `cwd`'s spelling (`--show-cdup`, not
+`--show-toplevel`) and `ROOT` follows the launcher's path.
 
 **Alternatives turned down.**
 
@@ -323,9 +334,12 @@ spec's edge case says.
 - The harness keeps the `result` text of the last `ResultMessage` of each model
   session in this process. On the `run_implement` path that is one text. On the
   `run_per_task` path each task's text is kept under a `### <task ID>` header, in
-  task order. `push_and_open_pr` appends the lot to the PR body under
-  `## Agent verification notes`, cut to one 4 000-character cap. When there is no
-  such text (the all-done shortcut, or no result message), the section is left out.
+  task order. `push_and_open_pr` puts the lot under `## Agent verification notes`,
+  inside a `~~~` fence and cut to one 4 000-character cap (data-model "Verification
+  notes"). A new PR gets the section in its body. When the PR already exists, the same
+  section is posted as a PR comment (see "PR that already exists" below). When there
+  is no such text (the all-done shortcut, or no result message), the section is left
+  out.
 - **This widens FR-011's mechanism.** FR-011 names the `IMPLEMENT_PROMPT` change
   only, but its aim is that the reason reaches the reviewer. One session per open task
   is the default path (specs/011 F7-a), so a change to `IMPLEMENT_PROMPT` alone would
@@ -351,6 +365,19 @@ spec's edge case says.
   opens with this seat's notes.
 - **GitHub-comment path** (`swe-agent-build.yml`). This is the same `agent.py`, so the
   behaviour is the same.
+- **PR that already exists** (added 2026-10-13, T006 review). Under the
+  `architect-stage-v1` patch, `ensure_target_pr_activity` opens the target PR before
+  Build (`orchestration/activities.py`, `pipeline_workflow.py`), and on build attempts
+  2 and 3 the PR exists too. `push_and_open_pr` then takes its "already exists" branch,
+  and a `.pr-body.md` is never applied. So on the Temporal path the body alone would
+  never carry the notes. The harness posts the section as a PR comment instead:
+  `gh pr comment <branch> --body-file <file>`, with the fixed header as its first line.
+  The webhook bridge (`orchestration/webhook_bridge/grammar.py` `parse`) reads only the
+  first non-empty line of a comment, so the model's text below the header cannot be
+  parsed as a run or gate command. A failed comment call is a warning on stderr, not a
+  failed run. That the per-sandbox App token (pull requests write) may post the
+  comment is expected from GitHub's permission table, not yet seen in a run: the next
+  supervised run checks it (quickstart V8).
 
 **Rationale.**
 
@@ -371,14 +398,20 @@ spec's edge case says.
   count as "work" and pass `verify_new_commit`.
 - The notes in the `checkpoint: end of run` commit message: still three clicks away,
   and the commit message is fixed by the harness.
-- A PR comment: needs one more `gh` call, with error handling, and adds nothing over
-  the body.
+- A PR comment *instead of* the body: needs one more `gh` call for every run. It was
+  first turned down for every case; the "PR that already exists" trace above reopened
+  it for the case where the body is never applied.
+- The notes as plain Markdown or a `> ` quote: a `Fixes #12` line in a PR body closes
+  issue 12 on merge, and an `@user` pings people, in a quote as well. A fenced block
+  is not parsed for either (T006 review).
 
 **Files that change with it:**
 
 - `tests/test_swe_agent_seat.py:322-327`, which pins "git add -A && git commit";
 - new tests for the PR-body section on both paths: one `IMPLEMENT_PROMPT` run, and a
-  per-task run with two tasks (two `###` headers, one cap);
+  per-task run with two tasks (two `###` headers, one cap); one where `gh pr create`
+  says "already exists" (the section goes to `gh pr comment`); one with `Fixes #1` and
+  `@someone` in the notes (both stay inside the fence);
 - `docs/40-sequence-swe-agent-runtime.md:47,86`;
 - `registry/agents/swe-agent/SKILL.md` prose. Its `manifest.yaml` and versions do
   not change, so AF-REGISTRY does not apply.
@@ -438,13 +471,19 @@ being rebased would then pass.
 ## R11 — Unloadable `lib.sh` (FR-015)
 
 **Decision.** The policy.sh message becomes
-`[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout -- .claude/hooks/lib.sh (or fix its syntax error), then retry.`
+`[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD -- .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git merge --abort first, or fix the conflict or syntax error in an editor), then retry.`
 It keeps exit 2. CLAUDE.md gets one sentence in the harness section that says the
 same thing.
 
 **Rationale.** Claude's own Bash calls are denied in this state, so the recovery has
 to happen outside the session. Whether `!` shell mode fires hooks is not documented,
 so the message does not offer it.
+
+The command is `git checkout HEAD -- <path>`, not `git checkout -- <path>`: when a
+rebase or merge stops on a conflict in a hook file, the file holds conflict markers
+and is unmerged, and `git checkout -- <path>` then fails with "path is unmerged"
+(T006 review, 2026-10-13). Aborting the rebase or merge, or fixing the file in an
+editor, works as well.
 
 ## R12 — Pruning hook state files (FR-016)
 
@@ -596,3 +635,44 @@ Every new piece uses tools that are already there:
 
 No pyproject is edited. SC-009 is checked with `shasum` before and after a full gate
 run, as `quickstart.md` V9 shows.
+
+## Rejected review findings (T006)
+
+The `senior-architect-reviewer` reviewed `plan.md` and both contracts before the
+tasks started. Ten findings came back. Findings 1, 2, 4, 5, 9 and 10 were applied
+(plan, contracts, data-model, research R7, R8 and R11, quickstart and tasks).
+Finding 7 was applied as a recorded known gap, as it suggested. These were not
+applied as suggested:
+
+- **Finding 3, AF-SPEC judges `ROOT`, not the worktree that owns the file.**
+  Recorded as a known gap in the hook contract ("Edits in another worktree") and for
+  CLAUDE.md (T056), not fixed here. The spec's edge case "Path spellings outside the
+  repo" says a path outside the repo is not judged by AF-SPEC, and FR-008 only widens
+  the spellings inside it. Judging each path against its own toplevel widens AF-SPEC
+  beyond the spec, so it is the operator's call (open question, 2026-10-13).
+- **Finding 6, the `ROOT` prefix compare is case-sensitive.** Rejected, for R7's
+  reason: on a case-sensitive volume (Linux, the E2B sandbox), a root spelled in
+  another case is a different directory, and folding it would judge that directory by
+  this worktree's branch. The suggested `realpath` alternative is a disk lookup, which
+  breaks the "judged by its spelling" edge case and fails for new files. Claude Code's
+  file tools take the path the model writes, but the model works from the `cwd`
+  spelling it is given, so a mis-cased root is an unlikely accident, not the 2026-10-11
+  failure.
+- **Finding 8, the Temporal guard patches `Client.connect`.** Rejected on both parts.
+  (1) Nothing in the repo uses `WorkflowEnvironment` (R16), and the four
+  `_connect_or_skip` copies are why the guard wraps `Client.connect` and not a helper.
+  A future unmarked `WorkflowEnvironment` test fails loudly, naming itself, and is
+  fixed by marking it or narrowing the guard then; it never passes silently.
+  (2) The guard is already defined directly in `orchestration/conftest.py`, the
+  orchestration suite's top-level conftest (data-model "Temporal marker guard");
+  `pytest_plugins` is used there only for `pytester`, which is allowed in that file.
+
+## Rejected review findings (implementation)
+
+- **shell-reviewer, `.claude/hooks/session-context.sh:29`, "ROOT has no failure guard".**
+  Rejected for this file only. The same guard was added to `policy.sh` and
+  `py-check.sh`, where an empty ROOT made AF-SPEC and the per-edit ruff check fail
+  open (tested by `test_policy_and_edit_fail_closed_without_a_root`).
+  `session-context.sh` exits 0 on every path and never blocks. An empty ROOT there
+  only skips the resume message, so a guard would add code with no change in what
+  the operator sees (2026-10-13).

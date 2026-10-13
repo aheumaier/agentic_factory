@@ -14,7 +14,8 @@
 #   AF-COMMIT — a Bash command containing the words `git` and `commit` runs
 #               whole-repo ruff and both pytest suites; red denies the commit.
 # A deny is a permissionDecision JSON on stdout with exit 0; a missing
-# jq/git/uv is exit 2 (fail closed). AF-REGISTRY and AF-HARNESS are
+# jq/git/uv, or an [AF-HOOKS] repo root that cannot be resolved, is exit 2
+# (fail closed). AF-REGISTRY and AF-HARNESS are
 # permissions.ask rules in settings.json, not checks here.
 #
 # Documented gaps: shell writes under guarded dirs are not pre-checked
@@ -32,7 +33,10 @@ INPUT=""
 # Bounded read: a hand run with an open, never-closing pipe must not hang.
 [ -t 0 ] || IFS= read -r -d '' -t 5 INPUT || true
 require_tools policy.sh jq git
-ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+ROOT=$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd) || {
+  echo "[AF-HOOKS] policy.sh cannot resolve the repo root from $0, so this call cannot be checked. To proceed: check that the worktree directory exists and can be entered, or start a new Claude Code session in an existing worktree of this repo." >&2
+  exit 2
+}
 
 MSG_SECRET='[AF-SECRET] .env and .env.braintrust hold live credentials and are never read by the agent. To proceed: read .env.example for variable names and ask the operator for any value you need.'
 MSG_SPEC='[AF-SPEC] Code under harness/, orchestration/ and eval/ needs a planned feature: branch NNN-slug (or worktree-NNN-slug) with specs/NNN-*/tasks.md. To proceed: run /speckit-specify → /speckit-plan → /speckit-tasks and work on that feature'"'"'s branch, or have the operator relaunch with AF_SPEC_EXCEPTION="<reason>".'

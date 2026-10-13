@@ -26,7 +26,7 @@ case "$src" in
   *) exit 0 ;;
 esac
 
-ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 branch="$(git -C "$ROOT" symbolic-ref --short -q HEAD 2>/dev/null)"
 dir="$(feature_spec_dir "$ROOT" 2>/dev/null)"
 [ -n "$branch" ] && [ -n "$dir" ] || exit 0

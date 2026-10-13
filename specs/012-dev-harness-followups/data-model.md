@@ -24,7 +24,7 @@ the same in every entry except for `script` and `args`.
 | `args` | `turn-start`, `edit` or `stop` for `py-check.sh`, else none |
 | `payload` | stdin, read once into a variable and passed on unchanged |
 | `cwd` | `.cwd` from the payload, or `pwd` when jq fails or the field is empty |
-| `candidates` | 1. `$(git -C <cwd> rev-parse --show-toplevel)/.claude/hooks/<script>`; 2. `$CLAUDE_PROJECT_DIR/.claude/hooks/<script>` |
+| `candidates` | 1. `<toplevel>/.claude/hooks/<script>`, where `<toplevel>` is `<cwd>` plus `git rev-parse --show-cdup`, entered with `cd` and printed with `pwd`, so it keeps the `cwd`'s spelling (no symlink resolution); 2. `$CLAUDE_PROJECT_DIR/.claude/hooks/<script>` |
 | run | the first candidate that is a regular file: `printf '%s' "$payload" \| bash <candidate> <args>`. The launcher exits with that status |
 | none found, `PreToolUse` | `[AF-HOOKS]` "repo hooks not found" on stderr, exit 2 |
 | none found, any other event | `{"systemMessage":"[AF-HOOKS] …"}` on stdout, exit 0 |
@@ -32,7 +32,10 @@ the same in every entry except for `script` and `args`.
 The scripts run under `bash <file>`, so a lost executable bit cannot cause exit 126.
 
 **Inside a script**: `ROOT` = `$(cd "$(dirname "$0")/../.." && pwd)`. That is the
-worktree whose script was chosen. `CLAUDE_PROJECT_DIR` is no longer read by any script.
+worktree whose script was chosen, spelled as the launcher spelled it. If that `cd`
+fails, `policy.sh` (with `[AF-HOOKS]`) and `py-check.sh` in `edit` and `stop` modes exit 2
+rather than run with an empty `ROOT`; `turn-start` exits 0, so the prompt is kept.
+`CLAUDE_PROJECT_DIR` is no longer read by any script.
 
 **Validation**:
 
@@ -109,7 +112,7 @@ judge this call". It is never a policy verdict on what the call does.
 
 | ID | Mechanism | Triggers |
 |---|---|---|
-| AF-HOOKS | launcher (exit 2) · `policy.sh` (exit 2) | script missing in both places; `lib.sh` fails to load; payload empty, not a JSON object, or without a string `tool_name` |
+| AF-HOOKS | launcher (exit 2) · `policy.sh` (exit 2) | script missing in both places; `lib.sh` fails to load; repo root cannot be resolved; payload empty, not a JSON object, or without a string `tool_name` |
 | AF-SECRET | `policy.sh` deny | Read/Grep/Glob path or filter matches (as shipped); Bash command matches the case-folded `SECRET_RE` |
 | AF-SPEC | `policy.sh` deny | normalised path under `harness/`, `orchestration/` or `eval/` (top segment case-folded), and no tasks.md for the feature branch |
 | AF-COMMIT | `policy.sh` deny | a gated git segment, and a gate outcome other than `green` |
@@ -154,13 +157,15 @@ AF-SPEC → AF-COMMIT. The first deny wins.
 
 ### AF-SPEC path
 
-`rel_path ROOT PATH`:
+`rel_path ROOT PATH` (normative; research R7 follows it):
 
 1. If `PATH` is relative, prefix it with `ROOT/`.
-2. Split on `/`. Drop empty and `.` segments. Each `..` pops one segment, and popping
-   past the root returns *outside*.
-3. Rejoin. If the result starts with `ROOT/`, return the rest. Otherwise return
-   *outside* (empty).
+2. Split the whole absolute path on `/`. Drop empty and `.` segments. Each `..` pops
+   one segment off the path built so far. A `..` with nothing left to pop (above `/`)
+   returns *outside*. `ROOT` plays no part in this step.
+3. Rejoin. Only now compare with `ROOT`: if the result starts with `ROOT/`, return the
+   rest. Otherwise return *outside* (empty). So `ROOT/../<rootname>/harness/a.py`
+   returns `harness/a.py`.
 4. AF-SPEC lower-cases the **first** segment of the result before the
    `harness/*|orchestration/*|eval/*` match.
 
@@ -236,10 +241,10 @@ target repo.
 |---|---|
 | source | `IMPLEMENT_PROMPT` path: `.result` of its last `ResultMessage`. Per-task path: `TASK_PROMPT` gains the same "list the checks you ran and why any still fail" sentence, and each task session's last `.result` is kept under a `### <task ID>` header, in task order. Not carried across seats (research R8) |
 | empty | `None` or whitespace only, or no model session ran (the all-done shortcut) → the section is left out |
-| size cap | 4 000 characters for the whole section, all task headers included. Longer text is cut and ends with `\n\n… (truncated)` |
-| placement | appended to the PR body written to `.pr-body.md`: `\n\n## Agent verification notes\n\n<text>` |
-
-The body before the section is unchanged (the first `specs/*/spec.md`, as today).
+| size cap | 4 000 characters for the notes text, all task headers included, before the fence is added. Longer text is cut and ends with `\n\n… (truncated)` |
+| format | the fixed header, then the notes inside a `~~~` fence: `## Agent verification notes\n\n~~~text\n<text>\n~~~`. Each `~~~` inside the text becomes `~~\~`, so no line of the text can close the fence. The fence keeps model text such as `Fixes #12` or `@someone` from being read as GitHub markup, and shows the reviewer which text is the model's (T006 review, 2026-10-13) |
+| placement, new PR | `gh pr create` succeeds: the section is appended to the PR body written to `.pr-body.md`, after `\n\n`. The body before the section is unchanged (the first `specs/*/spec.md`, as today) |
+| placement, PR exists | `gh pr create` fails with "already exists" (the architect stage's `ensure_target_pr_activity` opened the PR before Build, or this is build attempt 2 or 3): the same section is posted as a PR comment, `gh pr comment <branch> --repo <repo> --body-file <file>`. The comment's first line is the fixed header, and the webhook bridge's `parse` reads only the first non-empty line, so text below it is never read as a command. One comment per build attempt. A failed `gh pr comment` is printed to stderr as a warning and does not fail the run: the commits and the PR are already in place |
 
 ## Temporal marker guard (new; FR-022)
 

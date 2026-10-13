@@ -48,10 +48,10 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 - [X] T001 Commit the 012 design docs on branch `worktree-012-dev-harness-followups`. The files are `specs/012-dev-harness-followups/{spec.md,plan.md,research.md,data-model.md,quickstart.md,tasks.md,contracts/,checklists/}` and `.specify/feature.json`. Message: `docs(012): plan and tasks`. This is a docs-only commit, so the reviewer agents are skipped; say so in the report.
 - [ ] T002 Rebase onto the new `main` with `git fetch origin && git rebase origin/main`. PR #6 (feature 013, merge commit `91e1af0`, merged 2026-10-12) changed `CLAUDE.md` (the swe-agent row), `harness/swe-agent/SKILL.md`, `registry/agents/swe-agent/SKILL.md` and `orchestration/{activities.py,worker.py,webhook_bridge/github_app.py}`. Resolve any conflict in favour of `main`, then re-read those three docs before T033 (SKILL.md) and T056 (CLAUDE.md). The orchestration test line numbers in T050 may have shifted after the rebase; find them again by grep. Run `git log --oneline origin/main..HEAD` and confirm only your own commits are listed.
-- [ ] T003 Check the tools and record what is missing in `specs/012-dev-harness-followups/quickstart.md` under "Prerequisites": `command -v jq git uv shellcheck`, `command -v timeout || command -v gtimeout`, and `claude --version` (2.1.285 is expected; `onFailure` is not used). If `timeout`/`gtimeout` is missing, stop and ask the operator to run `brew install coreutils`. If `shellcheck` is missing, ask for `brew install shellcheck` (T048 would otherwise skip).
-- [ ] T004 Record the lockfile baseline (SC-009, FR-025): `shasum uv.lock orchestration/uv.lock > "$SCRATCH/af-lock-before"`, where `$SCRATCH` is the session scratchpad directory.
-- [ ] T005 Run the baseline gate one step at a time: `uv run --locked ruff check .`, then `uv run --locked pytest tests/ -q`, then `cd orchestration && uv run --locked pytest -q`. Record each step's pass count and wall time. The values seen while planning were 271 passed in 26 s and 167 passed in 27 s; the counts after T002 may differ. All three steps must be green before you go on.
-- [ ] T006 Run the `senior-architect-reviewer` agent on `specs/012-dev-harness-followups/plan.md`, `contracts/hook-interface.md` and `contracts/drift-conventions.md`, as the plan's review step asks. Fix confirmed findings in the spec docs. Record rejected findings, with the reason, at the end of `research.md`.
+- [X] T003 Check the tools and record what is missing in `specs/012-dev-harness-followups/quickstart.md` under "Prerequisites": `command -v jq git uv shellcheck`, `command -v timeout || command -v gtimeout`, and `claude --version` (2.1.285 is expected; `onFailure` is not used). If `timeout`/`gtimeout` is missing, stop and ask the operator to run `brew install coreutils`. If `shellcheck` is missing, ask for `brew install shellcheck` (T048 would otherwise skip).
+- [X] T004 Record the lockfile baseline (SC-009, FR-025): `shasum uv.lock orchestration/uv.lock > "$SCRATCH/af-lock-before"`, where `$SCRATCH` is the session scratchpad directory.
+- [X] T005 Run the baseline gate one step at a time: `uv run --locked ruff check .`, then `uv run --locked pytest tests/ -q`, then `cd orchestration && uv run --locked pytest -q`. Record each step's pass count and wall time. The values seen while planning were 271 passed in 26 s and 167 passed in 27 s; the counts after T002 may differ. All three steps must be green before you go on.
+- [X] T006 Run the `senior-architect-reviewer` agent on `specs/012-dev-harness-followups/plan.md`, `contracts/hook-interface.md` and `contracts/drift-conventions.md`, as the plan's review step asks. Fix confirmed findings in the spec docs. Record rejected findings, with the reason, at the end of `research.md`.
 
 ---
 
@@ -61,13 +61,13 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 **⚠️ CRITICAL**: Finish this phase before any story phase.
 
-- [ ] T007 Write the R2 test first (FR-002) in `tests/test_harness_hooks.py`: `test_root_comes_from_the_script_not_the_env`.
+- [X] T007 Write the R2 test first (FR-002) in `tests/test_harness_hooks.py`: `test_root_comes_from_the_script_not_the_env`.
   1. Create a second `harness_repo`-like tmp repo B. Copy `tmp_path_factory.mktemp` and the fixture body, or factor the fixture body into a plain function and call it twice. Do not add a second fixture.
   2. Run `policy.sh` from repo A with `env_extra={"CLAUDE_PROJECT_DIR": str(B)}`, on an Edit of `A/harness/x.py`, while A is on `main` and B is on a planned `042-x` branch (`switch(B, "042-x", tasks=True)`).
-  3. Assert AF-SPEC denies it. The old code read B's branch and allowed it.
-- [ ] T008 Make every script take `ROOT` from its own path (R2, FR-002): `ROOT=$(cd "$(dirname "$0")/../.." && pwd)`. The lines are `.claude/hooks/policy.sh:35`, `.claude/hooks/py-check.sh:34` and `.claude/hooks/session-context.sh:29`. No script may read `CLAUDE_PROJECT_DIR` afterwards (`grep -n CLAUDE_PROJECT_DIR .claude/hooks/*.sh` prints nothing). Run `bash -n` on each script. T007 now passes. (AF-HARNESS prompt.)
-- [ ] T009 Add a test helper `deny_line(result) -> str` in `tests/test_harness_hooks.py` that returns the first non-empty stderr line. Add the deny-format check to the existing `assert_denied` (:576): the reason's first line must match `^\[AF-[A-Z]+\] .+\. To proceed: .+$`. Every existing policy deny already has this shape, so the suite stays green. From here on, every deny test checks the format (data-model validation).
-- [ ] T010 Add the gate-runner stubs to `tests/test_harness_hooks.py`, next to `_UV_STUB`. Put a `timeout` stub in `<tmp>/bin` that:
+  3. Assert AF-SPEC denies it, for an absolute and for a relative `file_path`. The old code judged the relative path on B's branch and allowed it; it treated the absolute A path as outside B and made no decision.
+- [X] T008 Make every script take `ROOT` from its own path (R2, FR-002): `ROOT=$(cd "$(dirname "$0")/../.." && pwd)`. The lines are `.claude/hooks/policy.sh:35`, `.claude/hooks/py-check.sh:34` and `.claude/hooks/session-context.sh:29`. No script may read `CLAUDE_PROJECT_DIR` afterwards (`grep -n CLAUDE_PROJECT_DIR .claude/hooks/*.sh` prints nothing). Run `bash -n` on each script. T007 now passes. (AF-HARNESS prompt.)
+- [X] T009 Add a test helper `deny_line(result) -> str` in `tests/test_harness_hooks.py` that returns the first non-empty stderr line. Add the deny-format check to the existing `assert_denied` (:576): the reason's first line must match `^\[AF-[A-Z]+\] .+\. To proceed: .+$`. Every existing policy deny already has this shape, so the suite stays green. From here on, every deny test checks the format (data-model validation).
+- [X] T010 Add the gate-runner stubs to `tests/test_harness_hooks.py`, next to `_UV_STUB`. Put a `timeout` stub in `<tmp>/bin` that:
   - logs its argv to `<tmp>/timeout-calls.log`;
   - accepts `--kill-after=5 <n>s <cmd…>`;
   - exits with `<tmp>/timeout.rc` when that file exists (to fake 124/137);
@@ -75,7 +75,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
   Only `harness_repo` installs it, so existing tests keep passing. Add a helper `gate_limit(repo) -> list[str]` that returns the `<n>` values from the log. This is test infrastructure, not a verdict change.
 
-**Checkpoint**: The root suite is green. Every hook test still passes, with ROOT taken from `$0`.
+**Checkpoint**: The root suite is green. Every hook test still passes, with ROOT taken from `$0`. FR-002 is met only once T022's launcher lands: until then `settings.json` still starts each script as `"$CLAUDE_PROJECT_DIR"/.claude/hooks/<script>`, so `$0` is still the launch worktree. Fix round (2026-10-13): `policy.sh` and `py-check.sh` exit 2 when that `cd` fails (`test_policy_and_edit_fail_closed_without_a_root`).
 
 ---
 
@@ -102,7 +102,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 - [ ] T015 [US1] Launcher and settings tests in `tests/test_harness_hooks.py` (FR-001, R1):
   - Replace `test_settings_wire_every_hook` (:1167) and the `session-context` assertion in `test_settings_wire_context_continuity_and_cap` (:1180). Their `.endswith("py-check.sh stop")`-style checks no longer hold, so mark the change `# FR-001`.
   - New `test_every_hook_uses_the_launcher`, for each of PreToolUse→`policy.sh` (timeout 300), PostToolUse→`py-check.sh edit`, UserPromptSubmit→`py-check.sh turn-start`, Stop→`py-check.sh stop` (timeout 300) and SessionStart(`compact|clear`)→`session-context.sh`:
-    - the command contains `git -C "${d:-.}" rev-parse --show-toplevel`, `"$CLAUDE_PROJECT_DIR"` and `bash "$r/.claude/hooks/<script>" <args>`;
+    - the command contains `git rev-parse --show-cdup` and no `--show-toplevel` (the root keeps the `cwd`'s spelling; 012 fix round), `"$CLAUDE_PROJECT_DIR"` and `bash "$r/.claude/hooks/<script>" <args>`;
     - it contains no `'` inside the AF-HOOKS message;
     - `sh -n -c <command>` exits 0;
     - `shellcheck -s sh -` on the command exits 0 (skip only that assertion if shellcheck is missing).
@@ -110,7 +110,8 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 - [ ] T016 [US1] Launcher behaviour tests in `tests/test_harness_hooks.py` (FR-001, SC-001). They run the real launcher strings from `settings()` with `subprocess.run(["/bin/sh", "-c", cmd], input=payload, env=…)`. Use `test_launcher_finds_scripts` parametrized over:
   - (a) the payload's `cwd` is a `harness_repo` and `CLAUDE_PROJECT_DIR` points to a deleted dir: the repo's hook runs (a policy deny for an Edit of `harness/x.py` on `main`);
   - (b) `cwd` is a non-repo tmp dir and `CLAUDE_PROJECT_DIR` is the repo: the repo's hook runs;
-  - (c) neither has `.claude/hooks/<script>`: PreToolUse exits 2 with the AF-HOOKS "were not found" text on stderr; Stop, PostToolUse, UserPromptSubmit and SessionStart exit 0 with stdout `{"systemMessage":"[AF-HOOKS] …"}`, which is valid JSON.
+  - (c) neither has `.claude/hooks/<script>`: PreToolUse exits 2 with the AF-HOOKS "were not found" text on stderr; Stop, PostToolUse, UserPromptSubmit and SessionStart exit 0 with stdout `{"systemMessage":"[AF-HOOKS] …"}`, which is valid JSON;
+  - (d) the payload's `cwd` is a symlink to a `harness_repo` (create one: `tmp_path` is already a physical path on macOS), the repo is on `main`, and the Edit's `file_path` is spelled through the symlink: AF-SPEC denies. A launcher built on `--show-toplevel` would give the physical root, and the edit would get no decision (012 fix round, 2026-10-13).
 - [ ] T017 [US1] Deny format for the stderr-only denies in `tests/test_harness_hooks.py` (data-model validation). Policy denies already get the format check through `assert_denied` (T009). In T012 and T016(c), also assert that `deny_line(result)` matches `^\[AF-[A-Z]+\] .+\. To proceed: .+$`. Then run the suite and confirm T011–T017 fail for the expected reasons, and nothing else fails.
 
 ### Implementation for User Story 1
@@ -134,7 +135,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - bash 3.2 only: no `${x,,}`, no `mapfile`. (AF-HARNESS prompt.)
 - [ ] T021 [US1] Stop gate in `.claude/hooks/py-check.sh` (stop mode, :144-214). Run ruff and the suites through T018's runner (FR-003). A timed-out or no-runner outcome goes down the existing red path: exit 2 with the outcome, then "still RED" on the retry. Run `bash -n`. (AF-HARNESS prompt.) T011 and T012–T014 now pass.
 - [ ] T022 [US1] Launcher in `.claude/settings.json` (FR-001, R1). Replace each hook `command` with the one-line POSIX sh launcher from `contracts/hook-interface.md` "Launcher", joined with `;`:
-  `p=$(cat); d=$(printf '%s' "$p" | jq -r '.cwd // empty' 2>/dev/null); t=$(git -C "${d:-.}" rev-parse --show-toplevel 2>/dev/null); for r in "$t" "$CLAUDE_PROJECT_DIR"; do if [ -n "$r" ] && [ -f "$r/.claude/hooks/<script>" ]; then printf '%s' "$p" | bash "$r/.claude/hooks/<script>" <args>; exit $?; fi; done; <not-found>`
+  `p=$(cat); d=$(printf '%s' "$p" | jq -r '.cwd // empty' 2>/dev/null); t=$(cd "${d:-.}" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd "./$c" && pwd); for r in "$t" "$CLAUDE_PROJECT_DIR"; do if [ -n "$r" ] && [ -f "$r/.claude/hooks/<script>" ]; then printf '%s' "$p" | bash "$r/.claude/hooks/<script>" <args>; exit $?; fi; done; <not-found>`
   - PreToolUse (`policy.sh`, timeout 300): not-found is `echo '<AF-HOOKS missing>' >&2; exit 2`.
   - Others: not-found is `echo '{"systemMessage":"<AF-HOOKS missing>"}'; exit 0`. The entries are PostToolUse `py-check.sh edit`, UserPromptSubmit `py-check.sh turn-start`, Stop `py-check.sh stop` (timeout 300) and SessionStart(`compact|clear`) `session-context.sh`.
   - `<AF-HOOKS missing>` is the "were not found" text from the contract, with no `'`.
@@ -159,6 +160,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - `harness/./x.py`, `pkg/../harness/x.py`, `./harness/x.py`, `harness//x.py`, `Harness/x.py` and `HARNESS/x.py` are guarded, so AF-SPEC denies them on `main`;
   - `harness/../pkg/x.py` and `harnessx/x.py` are not guarded;
   - `../../outside.py` (popping past the root) is outside the repo, so there is no decision.
+  - Absolute only: `<root>/../<rootname>/harness/x.py` climbs out and back in, so it is guarded and denied on `main` (data-model "AF-SPEC path" step 2 runs on the whole path; T006 review, finding 5).
 
   Use `_edit(repo, rel)` with both a relative and an absolute `file_path`.
 - [ ] T025 [US2] Secret spelling tests in `tests/test_harness_hooks.py` (FR-007, FR-009, R6). Extend `_SECRET_DENIED` (:600) and `_SECRET_ALLOWED` (:617) only by adding rows; do not edit existing ones.
@@ -173,7 +175,9 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
   Add `test_task_and_feedback_prompts_do_not_ask_to_commit`: `TASK_PROMPT` contains "list the checks you ran"; `FEEDBACK_PROMPT_SUFFIX` does not contain "committing".
 - [ ] T027 [US2] swe-agent PR-body tests in `tests/test_swe_agent_seat.py` (FR-011, R8). Reuse the module's existing fake `query` and `origin` fixtures, and follow the shape of `test_checkpoint_push_follows_branch_not_head`.
-  - `test_pr_body_has_verification_notes_after_one_session`: one IMPLEMENT run whose last `ResultMessage.result` is "ran pytest: 3 passed". `.pr-body.md` ends with `\n\n## Agent verification notes\n\nran pytest: 3 passed`.
+  - `test_pr_body_has_verification_notes_after_one_session`: one IMPLEMENT run whose last `ResultMessage.result` is "ran pytest: 3 passed". `.pr-body.md` ends with `\n\n## Agent verification notes\n\n~~~text\nran pytest: 3 passed\n~~~` (data-model "Verification notes", fenced per the T006 review).
+  - `test_notes_go_to_a_comment_when_the_pr_exists`: `gh pr create` fails with "already exists". `gh pr comment <branch> --body-file <f>` runs, and `<f>`'s first line is `## Agent verification notes`. A failing `gh pr comment` does not fail the run (T006 review, finding 1).
+  - `test_notes_are_fenced`: notes with `Fixes #1`, `@someone` and a `~~~` line. Both strings sit between the opening and the closing fence, and the `~~~` line became `~~\~` (T006 review, finding 9).
   - `test_per_task_notes_keep_task_order`: two per-task sessions, T001 then T002, each returning text. The section holds `### T001` before `### T002`.
   - `test_notes_are_capped`: 5000 chars of result. The section is at most 4000 chars and ends with `\n\n… (truncated)`.
   - `test_notes_are_omitted_when_empty`: an empty result, and a run with no session. Neither has the heading.
@@ -182,10 +186,11 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Implementation for User Story 2
 
-- [ ] T028 [US2] `rel_path` normalisation in `.claude/hooks/lib.sh:89` (FR-008, R7). Normalise lexically:
+- [ ] T028 [US2] `rel_path` normalisation in `.claude/hooks/lib.sh:89` (FR-008, R7). Normalise lexically, as data-model "AF-SPEC path" says:
+  - make the path absolute against ROOT, then work on the whole absolute path;
   - drop `.` and empty segments;
-  - each `..` pops one segment;
-  - popping past the root means outside (return 1).
+  - each `..` pops one segment; a `..` with nothing left to pop means outside (return 1);
+  - only then compare with `ROOT/`; no match means outside (return 1).
 
   No disk lookups and no symlink resolution. bash 3.2 only. Run `bash -n`. (AF-HARNESS prompt.)
 - [ ] T029 [US2] AF-SPEC case fold in `.claude/hooks/policy.sh` (FR-008, R7). Lower-case only the first path segment (`tr '[:upper:]' '[:lower:]'`) before matching `harness/`, `orchestration/` or `eval/`. T024 now passes. (AF-HARNESS prompt.)
@@ -206,7 +211,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 - [ ] T032 [US2] swe-agent notes in `harness/swe-agent/agent.py` (FR-011, R8):
   - `run_implement` (:340) keeps the last `ResultMessage.result` of its session.
   - `run_per_task` (:379) keeps each one under `### <task ID>`, in task order.
-  - Pass the joined text to `push_and_open_pr`. It appends `\n\n## Agent verification notes\n\n<text>` to `.pr-body.md`, capping the whole section at 4000 chars; cut text ends with `\n\n… (truncated)`.
+  - Pass the joined text to `push_and_open_pr`. It caps the text at 4000 chars (cut text ends with `\n\n… (truncated)`), fences it as data-model "Verification notes" says, and appends the section to `.pr-body.md`. When `gh pr create` says "already exists", it posts the same section with `gh pr comment <branch> --repo <repo> --body-file`, and a failure there is a stderr warning only.
   - Leave the section out when the text is empty or no session ran.
   - Do not carry notes across seats.
 
@@ -246,7 +251,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - `test_rebase_reads_tasks_from_the_branch_tip`: `tasks.md` exists only on the branch tip, not in the detached worktree. The edit is allowed.
   - `test_rebase_of_an_unplanned_branch_is_denied`: same, but with no tasks.md. AF-SPEC denies.
   - `test_session_context_names_the_branch_during_a_rebase`: `session_context(repo, "compact")` during the rebase names `042-x`, and its rule list contains `AF-HOOKS`. Update `_RULES` at :931 to include `"AF-HOOKS"` with `# FR-014`.
-- [ ] T039 [US3] Lib-load test in `tests/test_harness_hooks.py` (FR-015, R11). `test_policy_without_lib_names_the_recovery`: parametrize over lib.sh deleted and lib.sh with a syntax error (`echo 'if then' >> lib.sh`). `policy` exits 2 and stderr's first line equals the contract's AF-HOOKS "could not be loaded" text, which contains `git checkout -- .claude/hooks/lib.sh`. The existing `test_turn_start_and_session_context_never_fail[no-lib]` stays unchanged: those two hooks still exit 0.
+- [ ] T039 [US3] Lib-load test in `tests/test_harness_hooks.py` (FR-015, R11). `test_policy_without_lib_names_the_recovery`: parametrize over lib.sh deleted and lib.sh with a syntax error (`echo 'if then' >> lib.sh`). `policy` exits 2 and stderr's first line equals the contract's AF-HOOKS "could not be loaded" text, which contains `git checkout HEAD -- .claude/hooks/lib.sh` and `git rebase --abort` (T006 review: `git checkout --` fails on an unmerged file). The existing `test_turn_start_and_session_context_never_fail[no-lib]` stays unchanged: those two hooks still exit 0.
 - [ ] T040 [US3] Prune test in `tests/test_harness_hooks.py` (FR-016, R12). `test_turn_start_prunes_stale_ctx_and_exception_files`: create `ctx-old.level` and `exception-old.notified` in `state_dir(repo)` and age them 8 days with `_age(path, 8 * DAY)`; also create a fresh `ctx-new.level`. After `turn_start`, the old two are gone and the fresh one remains. A read-only state dir must not make `turn_start` fail.
 - [ ] T041 [US3] Compaction tests in `tests/test_harness_hooks.py` (FR-017, R13). Use `write_transcript` with a dict entry `{"type": "system", "subtype": "compact_boundary"}`:
   - `test_context_after_compaction_with_no_usage_is_silent`: a high usage (`_assistant(130000)`), then a boundary, then `_FILLER`. No warning, and `ctx_marker(repo)` is left untouched.
@@ -360,8 +365,9 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - List the gated git verbs in the AF-COMMIT row.
   - Add the `brew install coreutils` (timeout) and `shellcheck` prerequisites.
   - Describe the drift tier at Stop.
-  - Add the lib.sh recovery sentence: from a terminal outside Claude Code, `git checkout -- .claude/hooks/lib.sh`.
+  - Add the lib.sh recovery sentence: from a terminal outside Claude Code, `git checkout HEAD -- .claude/hooks/lib.sh`; in a rebase or merge stopped on a hook-file conflict, `git rebase --abort` or `git merge --abort` first, or fix the file in an editor.
   - Correct the "Known gaps" bullets that 012 closes.
+  - Add two "Known gaps" bullets from the hook contract (T006 review): a session whose own working directory was removed runs no hooks at all (fixed only by `onFailure` from Claude Code 2.1.295), so do not remove the worktree a session is in; and AF-SPEC does not judge edits in another worktree or in the main checkout.
 
   Keep the swe-agent row as merged by PR #6, and add only the "harness commits" wording. Run `uv run --locked pytest tests/test_context_drift.py -q` (green).
 - [ ] T057 Reviews, in parallel and in the background: `shell-reviewer` on `.claude/hooks/*.sh` and the settings.json launcher strings; `py-codereviewer` on `tests/test_harness_hooks.py`, `tests/test_context_drift.py`, `tests/test_swe_agent_seat.py`, `harness/swe-agent/agent.py`, `orchestration/conftest.py` and `orchestration/tests/test_temporal_marker_guard.py`; `senior-architect-reviewer` on the finished feature (contract change). Fix confirmed findings and re-run once. Record each rejected finding, with its reason, in the PR description.

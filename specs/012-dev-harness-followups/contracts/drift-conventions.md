@@ -68,3 +68,14 @@ covered at Stop.
 **Gap that stays.** An identifier can live in a file that is neither Python nor in
 scope, for example a YAML or Markdown file elsewhere. If a turn removes it there, Stop
 does not notice. AF-COMMIT catches it before the commit.
+
+**Second gap that stays: untracked files count at commit time** (T006 review,
+2026-10-13). AF-COMMIT runs the same drift test with the same corpus, untracked files
+included, and no CI job runs pytest. So a session can write an untracked `foo.py` that
+defines `_helper`, mention `_helper` in `CLAUDE.md`, and commit only `CLAUDE.md`: the
+drift test finds `_helper` in the untracked file and passes, and the commit points at a
+name it does not contain. This is accepted: FR-020 puts untracked files in the corpus
+on purpose, so that a new file can be documented before it is staged, and the next
+drift run in a checkout without the untracked file fails. Closing it would mean a
+tracked-only corpus (`git ls-files -c`) for the AF-COMMIT run only, through an env
+flag; that is left for later.

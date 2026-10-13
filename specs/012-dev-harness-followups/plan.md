@@ -54,7 +54,9 @@ launcher:
 
 - The model is no longer told to commit. It ends with a short account of the checks it
   ran.
-- The harness puts that account in the PR body under `## Agent verification notes`.
+- The harness puts that account, fenced, under `## Agent verification notes`: in the PR
+  body for a new PR, or in a PR comment when the PR already exists, which is the usual
+  case on the Temporal path (research R8).
 - The checkpoint commit stays the only commit.
 
 ### 5. Drift, state and lint (FR-016 to FR-025)
@@ -145,7 +147,7 @@ The binding constraints come from CLAUDE.md, and this plan is checked against th
 | Root `pyproject.toml` is dev/test tooling only, each agent keeps its own deps | ✔ no dependency added anywhere (FR-025) |
 | Ruff and both suites green, enforced by hooks | ✔ strengthened: time limit, more git commands, drift tier, shell lint |
 | Registry is the portability boundary, edits are AF-REGISTRY | ✔ only `registry/agents/swe-agent/SKILL.md` prose changes. No manifest or version file changes |
-| Model calls via LiteLLM (swe-agent's direct-to-Anthropic is a documented deviation) | ✔ unchanged. FR-011 changes the prompt text and PR body only |
+| Model calls via LiteLLM (swe-agent's direct-to-Anthropic is a documented deviation) | ✔ unchanged. FR-011 changes the prompt text and the PR body or comment only |
 | `prompts/agentic-swe.json` kept in sync with the agent design | n/a: `IMPLEMENT_PROMPT` lives in `agent.py`, not in that file (checked 2026-10-12) |
 | One session per worktree | ✔ the launcher follows the payload `cwd`, which is what makes per-worktree sessions safe after `EnterWorktree` |
 
@@ -217,11 +219,22 @@ trees.
 1. **Tests first, per slice.** Each FR-003 to FR-009 behaviour gets a test that fails
    on today's code before the fix (FR-010, SC-005). Write it, see it fail, fix it.
 2. **`lib.sh` first, and with care.** A syntax error in `lib.sh` makes `policy.sh`
-   deny every Bash call in this session (FR-015). So:
-   - run `bash -n .claude/hooks/lib.sh` right after each edit;
-   - keep one edit per change;
-   - the recovery runs from a terminal outside Claude Code:
-     `git checkout -- .claude/hooks/lib.sh`.
+   deny every covered call in this session (FR-015), including the Bash call that
+   would run `bash -n` and the Edit that would repair the file. A broken `policy.sh`
+   or `py-check.sh` does the same, since one of them runs on every call. So a
+   `bash -n` after the edit comes too late. Instead, for each change to `lib.sh`,
+   `policy.sh` or `py-check.sh`:
+   - copy the script to `$SCRATCH` and edit the copy there;
+   - run `bash -n` on the copy, and run the hook tests against it (the
+     `harness_repo` fixture copies the hooks into a temp repo, so point it at the
+     copy, or copy the copy over the temp repo's script);
+   - install it with one Write of the whole file, then run `bash -n` on the
+     installed file;
+   - keep one change per install.
+
+   The recovery, if it still breaks, runs from a terminal outside Claude Code:
+   `git checkout HEAD -- .claude/hooks/lib.sh` (in a stopped rebase or merge, first
+   `git rebase --abort` or `git merge --abort`).
 3. **Policy fixes (P1/P2)**, each with its tests:
    - `policy.sh`: ROOT from `$0`, input check, git verbs, secret message and
      spellings, path normalisation, rebase, timeout.
@@ -265,7 +278,8 @@ trees.
 | Drift tier misses a non-scope file that holds a D-ID name | Recorded in the drift contract. AF-COMMIT runs the whole root suite as the backstop |
 | Notes from an earlier seat are dropped on handoff | Accepted (research R8): they describe a tree the successor changed |
 | Model's final message is long or empty | The PR-body section is capped (data-model), and is left out when empty |
-| Editing `lib.sh` in this session locks the session on a syntax error | Implementation Order step 2 |
+| Editing `lib.sh`, `policy.sh` or `py-check.sh` in this session locks the session on a syntax error | Implementation Order step 2: edit and check a copy in `$SCRATCH`, then install it with one Write. The recovery can only run outside the session, because the broken hook denies the session's own repair calls |
+| A rebase or merge stops on a conflict in a hook file | The file holds conflict markers, so every covered call is denied. Recover outside the session: `git rebase --abort` / `git merge --abort`, or `git checkout HEAD -- <file>`, or fix it in an editor (research R11, quickstart Prerequisites) |
 
 ## Complexity Tracking
 

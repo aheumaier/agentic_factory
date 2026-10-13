@@ -22,8 +22,34 @@ otherwise.
 | `shellcheck` (optional) | lints the hook scripts. Without it the lint test is skipped, and the skip shows in the summary | `command -v shellcheck` |
 | Temporal (`make up`) | the `@pytest.mark.temporal` tests. Without it they skip | `nc -z localhost 7233` |
 
+**Checked on 2026-10-13 (T003)** on the build machine (macOS, Apple Silicon). Nothing is
+missing:
+
+- `jq` `/opt/homebrew/bin/jq`, `git` `/opt/homebrew/bin/git`, `uv` `~/.local/bin/uv`
+- `timeout` `/opt/homebrew/opt/coreutils/libexec/gnubin/timeout`, `gtimeout` `/opt/homebrew/bin/gtimeout`
+- `shellcheck` `/opt/homebrew/bin/shellcheck`
+- `claude --version`: `2.1.285 (Claude Code)`, as expected
+- Temporal: port 7233 is open
+
+**Baseline before any 012 code (T005, 2026-10-13)**, on `origin/main` `704ed29` plus the two
+012 docs commits. Wall time is the whole command, measured with `date +%s`:
+
+| Step | Result | Wall time |
+|---|---|---|
+| `uv run --locked ruff check .` | All checks passed | under 1 s |
+| `uv run --locked pytest tests/ -q` | 271 passed, 0 skipped | 24 s |
+| `cd orchestration && uv run --locked pytest -q` | 195 passed, 0 skipped (51 warnings) | 24 s |
+
+The orchestration count was 167 while planning. The other 28 tests came in with the
+rebase onto the new `main` (T002); the root count is unchanged.
+
 The hook config is read when a session starts. A session started before 012's
 `settings.json` landed still runs the old commands: start a new one for V1 and V2.
+
+If a rebase or merge stops on a conflict in a `.claude/hooks/` file, every covered
+call in the session is denied. Resolve it from a terminal outside Claude Code:
+`git rebase --abort` (or `git merge --abort`), or `git checkout HEAD -- <file>`, or fix
+the conflict in an editor. `git checkout -- <file>` fails on an unmerged file.
 
 ## V1: a session that loses its launch worktree (SC-001, live)
 
@@ -49,6 +75,13 @@ This repeats the 2026-10-11 failure. Use only disposable worktrees.
    `policy.sh` has this message, so it shows that the scripts of `af-v1-b` ran. (A
    Read of `.env` would not show it: the `permissions.deny` rules also refuse that,
    without any hook.)
+4a. Variant for the known gap "Deleted working directory" (hook contract). Use a third
+   disposable worktree `../af-v1-c` on branch `v1-c`. Start a second `claude` in it and
+   do not `cd` away. From the outside terminal, run
+   `git worktree remove --force ../af-v1-c`. In that session, ask for the Bash command
+   `cat .ENV`. **Record** whether it is denied, allowed, or fails with an error. An
+   allow is the expected known gap with Claude Code 2.1.285, not a failure of V1. End
+   that session and run `git branch -D v1-c`.
 5. From the outside terminal, move `../af-v1-b/.claude/hooks` aside (for example to
    `../af-v1-hooks`).
 6. In the session, ask for any Bash call, for example `git status`.
@@ -167,9 +200,12 @@ The ignored-file corpus case is automated in `tests/test_context_drift.py`.
 ## V8: swe-agent verification notes, Temporal guard, shell lint (FR-011, FR-022, FR-023)
 
 - **swe-agent:** `uv run --locked pytest tests/test_swe_agent_seat.py -q`. On the next
-  supervised swe-agent run, check that the PR body ends with
-  `## Agent verification notes` when the agent reported anything, and that the only
-  commits are the harness's own.
+  supervised swe-agent run, check that the agent's notes reached the PR when the agent
+  reported anything: at the end of the body for a new PR, or as a PR comment that starts
+  with `## Agent verification notes` when the PR already existed (the Temporal path's
+  usual case). This also checks that the sandbox's App token may post that comment, and
+  that a `Fixes #N` or `@name` inside the fenced notes neither links nor pings. Check
+  that the only commits are the harness's own.
 - **Temporal guard:** with Temporal down (`make down`), run
   `cd orchestration && uv run --locked pytest -q`.
   **Expected:** green, the live tests skip, and the guard's own tests pass. Repeat with

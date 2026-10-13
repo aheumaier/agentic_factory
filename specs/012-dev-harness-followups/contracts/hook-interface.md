@@ -22,7 +22,7 @@ now the launcher below, with `<script>` and `<args>` filled in per entry. It is 
 ```sh
 p=$(cat)
 d=$(printf '%s' "$p" | jq -r '.cwd // empty' 2>/dev/null)
-t=$(git -C "${d:-.}" rev-parse --show-toplevel 2>/dev/null)
+t=$(cd "${d:-.}" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd "./$c" && pwd)
 for r in "$t" "$CLAUDE_PROJECT_DIR"; do
   if [ -n "$r" ] && [ -f "$r/.claude/hooks/<script>" ]; then
     printf '%s' "$p" | bash "$r/.claude/hooks/<script>" <args>; exit $?
@@ -70,9 +70,30 @@ Known gaps, recorded, not fixed (2026-10-12):
   takes its root from `CLAUDE_PROJECT_DIR`, so in such a worktree it still judges the
   launch worktree's branch and still allows empty input: the FR-002 and FR-004 holes
   stay open there until the rebase.
-- **Spelling and nesting.** A `cwd` reached through a symlink resolves to the real
-  toplevel, which is the intended worktree. A worktree nested inside another worktree
+- **Spelling and nesting.** The toplevel keeps the `cwd`'s spelling: `--show-cdup`
+  plus `cd` and `pwd` climb up lexically, so a `cwd` reached through a symlink stays
+  spelled through it. `--show-toplevel` would print the physical path, `ROOT` would
+  follow it, and `rel_path`'s plain prefix compare would never match a `file_path`
+  spelled the way Claude Code reports it. Every guarded edit would then count as
+  outside the repo, and AF-SPEC would make no decision (012 fix round, 2026-10-13).
+  A worktree nested inside another worktree
   resolves to the inner one, so AF-SPEC judges the inner branch.
+- **Deleted working directory** (T006 review, 2026-10-13). When the session's own
+  working directory is a removed worktree (`ExitWorktree` remove, or
+  `git worktree remove` from outside while the session is still in it), Claude Code
+  cannot start the hook process at all: the spawn fails before the launcher runs.
+  Claude Code 2.1.285 treats that as a non-blocking error, so every covered call is
+  allowed. No hook command can fix this; only `onFailure` (Claude Code 2.1.295 and
+  later) can. CLAUDE.md tells the operator not to remove the worktree a session is in.
+  Quickstart V1 step 4a records what a live session shows.
+- **Edits in another worktree** (T006 review, 2026-10-13). AF-SPEC judges a path
+  against `ROOT`, the worktree whose scripts run. A file in the main checkout or in a
+  sibling worktree resolves outside `ROOT` and is not judged, as the spec's edge case
+  "Path spellings outside the repo" states. So a session on a spec branch can edit
+  `harness/` in a checkout that is on `main`, and that checkout's turn gate never sees
+  it. The same holds for FR-014's rebase lookup. Judging each path against the
+  worktree that owns it (`git -C <nearest existing parent> rev-parse --show-toplevel`)
+  would close this; it widens AF-SPEC and is left to the operator.
 
 ## Inputs (extends 010 "Inputs")
 
@@ -92,6 +113,7 @@ only the launcher reads it, as the second lookup. Each script sets
 - A missing `jq` or `git` still exits 2 with the 010 text.
 - `policy.sh` refuses with **AF-HOOKS on stderr and exit 2** when:
   - `lib.sh` fails to load (missing file or syntax error);
+  - the repo root cannot be resolved (the `cd` to `<script dir>/../..` fails);
   - the payload is empty, is not a JSON object, or has no string `tool_name`.
 
   There is no trusted input to answer in JSON, so this is the one deny that does not
@@ -169,7 +191,8 @@ contains a `'`: the launcher prints its message inside a single-quoted `sh` stri
 |---|---|---|
 | AF-HOOKS | scripts missing (launcher) | `[AF-HOOKS] The repo hook scripts (.claude/hooks/<script>) were not found in this worktree or in the launch directory, so this call cannot be checked. To proceed: start a new Claude Code session in an existing worktree of this repo (the main checkout or claude --worktree), or restore .claude/hooks/ from a terminal outside Claude Code.` |
 | AF-HOOKS | input empty or invalid | `[AF-HOOKS] The repo policy hook got no valid input, so it cannot judge this call. To proceed: retry the call; if it repeats, restart the session and report it.` |
-| AF-HOOKS | `lib.sh` not loaded | `[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout -- .claude/hooks/lib.sh (or fix its syntax error), then retry.` |
+| AF-HOOKS | repo root not resolved (`policy.sh`) | `[AF-HOOKS] policy.sh cannot resolve the repo root from <script path>, so this call cannot be checked. To proceed: check that the worktree directory exists and can be entered, or start a new Claude Code session in an existing worktree of this repo.` |
+| AF-HOOKS | `lib.sh` not loaded | `[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD -- .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git merge --abort first, or fix the conflict or syntax error in an editor), then retry.` |
 | AF-SECRET | Read, Grep, Glob | unchanged from 010 |
 | AF-SECRET | Bash (**new**, `MSG_SECRET_SHELL`) | `[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold live credentials, and reading, writing or copying them from the shell is refused. To proceed: use .env.example for variable names and ask the operator for any value you need.` |
 | AF-COMMIT | red run (verbs widened) | `[AF-COMMIT] git commands that write commits (commit, revert, cherry-pick, merge, am, rebase, pull) require ruff (whole repo) and both pytest suites to be green. To proceed: fix the failures below, then run the command again.` |
@@ -210,8 +233,11 @@ such as `{.env,x}` or `x:.env` is now denied as well. One regex stays, not two.
 ### AF-SPEC path (FR-008, FR-014)
 
 - The path is made absolute against `ROOT`, then `.` and `..` segments are resolved
-  as text. Nothing is looked up on disk, so symlinks are not followed.
-- A path that resolves outside `ROOT` is ignored, as in 010.
+  as text on the whole absolute path. Nothing is looked up on disk, so symlinks are
+  not followed.
+- Only the resolved path is compared with `ROOT`. A path that resolves outside `ROOT`
+  is ignored, as in 010. `<root>/../<rootname>/harness/a.py` resolves inside `ROOT`
+  and is guarded.
 - The first segment is lower-cased before the `harness/`, `orchestration/`, `eval/`
   match. `docs/../harness/a.py`, `./harness/a.py` and `Harness/a.py` all get the
   verdict of `harness/a.py`.

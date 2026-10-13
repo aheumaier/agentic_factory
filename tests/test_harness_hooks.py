@@ -1,14 +1,17 @@
 """Tests for the Claude Code hook scripts in .claude/hooks/ (feature 010).
 
 Each test drives the real bash scripts through subprocess with a synthetic
-JSON payload on stdin, inside a throwaway git repo with the hooks copied in
-and CLAUDE_PROJECT_DIR pointed at it (research R11). `uv` is a stub placed
-first on PATH: it logs its argv and returns the exit code/output a test sets
-per tool, so "suite red"/"suite green" need no network and no real suite.
-`git` and `jq` are real. The hook code has no test-only switches.
+JSON payload on stdin, inside a throwaway git repo with the hooks copied in.
+The scripts take their repo root from their own path (012 R2), so the copies
+judge the tmp repo; CLAUDE_PROJECT_DIR is still set, as Claude Code sets it.
+`uv` is a stub placed first on PATH: it logs its argv and returns the exit
+code/output a test sets per tool, so "suite red"/"suite green" need no
+network and no real suite. `timeout` is a stub too. `git` and `jq` are real.
+The hook code has no test-only switches.
 
-Layout under tmp_path: repo/ (the git repo), bin/uv (the stub),
-uv-calls.log, and <tool>.rc / <tool>.out for tool in ruff, pytest.
+Layout under tmp_path: repo/ (the git repo), bin/uv and bin/timeout (the
+stubs), uv-calls.log, timeout-calls.log, timeout.rc, and <tool>.rc /
+<tool>.out for tool in ruff, pytest.
 """
 import json
 import os
@@ -22,6 +25,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS_DIR = REPO_ROOT / ".claude" / "hooks"
+DENY_FORMAT = re.compile(r"^\[AF-[A-Z]+\] .+\. To proceed: .+$")
 
 # Uses only bash builtins, so it still works on the trimmed PATH of the
 # missing-tool tests. "run", --locked, --frozen and --directory <d> are
@@ -46,6 +50,18 @@ rc=0
 exit "$rc"
 """
 
+# Stands in for GNU timeout/gtimeout (012 R3): logs its argv, then exits with
+# timeout.rc when a test set one (124 = timed out, 137 = killed), otherwise
+# runs the command and returns its exit code. Bash builtins only, as above.
+_TIMEOUT_STUB = """#!/bin/bash
+T='{tmp}'
+(IFS=$'\\t'; printf '%s\\n' "$*") >> "$T/timeout-calls.log"
+[ -f "$T/timeout.rc" ] && exit "$(< "$T/timeout.rc")"
+case "${{1:-}}" in --kill-after=*) shift ;; esac
+shift
+"$@"
+"""
+
 
 def _clean_env() -> dict[str, str]:
     # Keep the operator's shell out of the fixture: a GIT_DIR from a git
@@ -67,6 +83,10 @@ def git(repo: Path, *args: str) -> str:
 
 @pytest.fixture
 def harness_repo(tmp_path: Path) -> Path:
+    return _make_harness_repo(tmp_path)
+
+
+def _make_harness_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)
     git(repo, "init", "-q", "-b", "010-x")
@@ -84,10 +104,11 @@ def harness_repo(tmp_path: Path) -> Path:
     for script in HOOKS_DIR.glob("*.sh"):
         shutil.copy2(script, hooks / script.name)
 
-    stub = tmp_path / "bin" / "uv"
-    stub.parent.mkdir()
-    stub.write_text(_UV_STUB.format(tmp=tmp_path))
-    stub.chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    for name, body in (("uv", _UV_STUB), ("timeout", _TIMEOUT_STUB)):
+        stub = tmp_path / "bin" / name
+        stub.write_text(body.format(tmp=tmp_path))
+        stub.chmod(0o755)
     return repo
 
 
@@ -108,6 +129,14 @@ def run_hook(
         input=payload if isinstance(payload, str) else json.dumps(payload),
         capture_output=True, text=True, env=env, timeout=60,
     )
+
+
+def gate_limit(repo: Path) -> list[str]:
+    """The <n> of each logged `timeout --kill-after=5 <n>s <cmd…>` call."""
+    log = repo.parent / "timeout-calls.log"
+    if not log.exists():
+        return []
+    return [line.split("\t")[1].removesuffix("s") for line in log.read_text().splitlines()]
 
 
 def uv_calls(repo: Path) -> list[list[str]]:
@@ -580,8 +609,16 @@ def assert_denied(result: subprocess.CompletedProcess, rule: str) -> str:
     assert out["hookEventName"] == "PreToolUse"
     assert out["permissionDecision"] == "deny"
     reason = out["permissionDecisionReason"]
-    assert re.match(rf"^\[{rule}\] .+\. To proceed: .+$", reason.splitlines()[0]), reason
+    first = reason.splitlines()[0]
+    # 012 data-model validation (T009): every deny shares one first-line format.
+    assert DENY_FORMAT.match(first), reason
+    assert first.startswith(f"[{rule}] "), reason
     return reason
+
+
+def deny_line(result: subprocess.CompletedProcess) -> str:
+    """The first non-empty stderr line, where exit-2 denies put their message."""
+    return next((line for line in result.stderr.splitlines() if line.strip()), "")
 
 
 def assert_no_decision(result: subprocess.CompletedProcess) -> None:
@@ -689,6 +726,32 @@ def test_unguarded_paths_need_no_feature(harness_repo, rel):
     switch(repo, "scratch")
 
     assert_no_decision(policy(repo, _edit(repo, rel)))
+
+
+@pytest.mark.parametrize("spelling", ["absolute", "relative"])
+def test_root_comes_from_the_script_not_the_env(harness_repo, tmp_path_factory, spelling):
+    # FR-002 (R2): a CLAUDE_PROJECT_DIR naming another checkout must not decide
+    # which branch AF-SPEC judges; the repo the scripts live in does. With ROOT
+    # taken from the env, the relative path was judged on B's planned branch
+    # and allowed, and the absolute one lay outside B and got no decision.
+    a = harness_repo
+    switch(a, "main")
+    b = _make_harness_repo(tmp_path_factory.mktemp("b"))
+    switch(b, "042-x", tasks=True)
+    payload = _edit(a, "harness/x.py")
+    if spelling == "relative":
+        payload["tool_input"]["file_path"] = "harness/x.py"
+
+    result = policy(a, payload, env_extra={"CLAUDE_PROJECT_DIR": str(b)})
+
+    reason = assert_denied(result, "AF-SPEC")
+    assert "branch: main" in reason.splitlines()[1:]
+
+
+def test_no_hook_script_reads_claude_project_dir():
+    # FR-002 (R2): only the launcher reads CLAUDE_PROJECT_DIR. A script that
+    # reads it again would judge the launch worktree instead of its own.
+    assert [p.name for p in HOOKS_DIR.glob("*.sh") if "CLAUDE_PROJECT_DIR" in p.read_text()] == []
 
 
 def test_paths_outside_the_repo_are_ignored(harness_repo, tmp_path_factory):
@@ -1094,6 +1157,64 @@ def test_stop_and_policy_fail_closed_without_tools(
 
     assert result.returncode == 2
     assert f"{missing} is required" in result.stderr
+
+
+def _run_without_root(repo: Path, script: str, args: list[str]) -> subprocess.CompletedProcess:
+    """Run a hook copy from its own dir with the repo dir at mode 0, so the
+    script's `cd <script dir>/../..` fails. bash's own startup warnings
+    (shell-init:, chdir:), caused by that cwd, are dropped from stderr."""
+    switch(repo, "main")
+    env = _clean_env()
+    env["PATH"] = f"{repo.parent / 'bin'}{os.pathsep}{env['PATH']}"
+    run = 'r=$1 s=$2; shift 2; chmod 0 "$r" && exec /bin/bash "./$s" "$@"'
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-c", run, "sh", str(repo), script, *args],
+            cwd=repo / ".claude" / "hooks", input=json.dumps(_edit(repo, "harness/x.py")),
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+    finally:
+        repo.chmod(0o755)
+    lines = result.stderr.splitlines(keepends=True)
+    result.stderr = "".join(s for s in lines if not s.startswith(("shell-init:", "chdir:")))
+    return result
+
+
+_NEEDS_DIR_PERMISSIONS = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores directory permissions, so chmod 0 cannot make cd fail"
+)
+
+
+@_NEEDS_DIR_PERMISSIONS
+@pytest.mark.parametrize(("script", "args"), [("policy.sh", []), ("py-check.sh", ["edit"])])
+def test_policy_and_edit_fail_closed_without_a_root(harness_repo, script, args):
+    # FR-002 (R2), 012 fix round: ROOT comes from `cd <script dir>/../..`. If
+    # that cd fails, an empty ROOT makes every absolute path look outside the
+    # repo, so AF-SPEC and the edit lint would pass the call unchecked.
+    result = _run_without_root(harness_repo, script, args)
+
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "cannot resolve the repo root" in result.stderr
+
+
+@_NEEDS_DIR_PERMISSIONS
+def test_policy_without_a_root_is_an_af_hooks_deny(harness_repo):
+    # FR-002 + data-model validation: policy.sh's exit-2 refusal is an AF-HOOKS
+    # deny, so its first line names the rule and a way to proceed.
+    first = deny_line(_run_without_root(harness_repo, "policy.sh", []))
+
+    assert DENY_FORMAT.match(first), first
+    assert first.startswith("[AF-HOOKS] "), first
+
+
+@_NEEDS_DIR_PERMISSIONS
+def test_turn_start_without_a_root_keeps_the_prompt(harness_repo):
+    # FR-002, 012 fix round: turn-start always exits 0 (an exit 2 from
+    # UserPromptSubmit erases the operator's prompt), as with a lib.sh failure.
+    result = _run_without_root(harness_repo, "py-check.sh", ["turn-start"])
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
 
 
 # ---------------------------------------------------------------------------

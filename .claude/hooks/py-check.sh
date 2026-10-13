@@ -31,7 +31,11 @@ if ! . "$(dirname "$0")/lib.sh"; then
   exit 2
 fi
 
-ROOT="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+ROOT=$(cd "$(dirname "$0")/../.." && pwd) || {
+  [ "$MODE" = "turn-start" ] && exit 0
+  echo "py-check.sh: cannot resolve the repo root from $0" >&2
+  exit 2
+}
 INPUT=""
 # Bounded read: a hand run with an open, never-closing pipe must not hang.
 [ -t 0 ] || IFS= read -r -d '' -t 5 INPUT || true
