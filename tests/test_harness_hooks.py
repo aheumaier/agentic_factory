@@ -1905,6 +1905,95 @@ def test_policy_without_lib_names_the_recovery(harness_repo, case):
     assert DENY_FORMAT.match(_AF_HOOKS_LIB)
 
 
+def test_policy_with_an_incomplete_lib_fails_closed(harness_repo):
+    # FR-015: a lib.sh that loads but defines no functions must not let a
+    # guarded edit through (each helper would just return 127).
+    repo = harness_repo
+    (repo / ".claude" / "hooks" / "lib.sh").write_text("GATE_LIMIT=240\n")
+
+    result = policy(repo, _edit(repo, "harness/x.py"))
+
+    assert result.returncode == 2
+    assert deny_line(result) == _AF_HOOKS_LIB
+
+
+def test_policy_turns_an_unexpected_error_into_a_deny(harness_repo):
+    # FR-015: any exit other than 0 or 2 (here set -u on an unset variable)
+    # would be a non-blocking hook error, so the call would go through.
+    repo = harness_repo
+    with (repo / ".claude" / "hooks" / "lib.sh").open("a") as f:
+        f.write("unset GATE_LIMIT\n")
+
+    result = policy(repo, bash("git status"))
+
+    assert result.returncode == 2
+    # bash's own error comes first and is kept: it names the cause.
+    last = result.stderr.strip().splitlines()[-1]
+    assert last.startswith("[AF-HOOKS] policy.sh stopped on an unexpected error (exit 1)")
+    assert DENY_FORMAT.match(last)
+
+
+def _py_check_edit(repo: Path, rel: str) -> subprocess.CompletedProcess:
+    return run_hook(repo, "py-check.sh", ["edit"], {"tool_input": {"file_path": str(repo / rel)}})
+
+
+@pytest.mark.parametrize("mode", ["stop", "edit"])
+def test_py_check_with_an_incomplete_lib_fails_closed(harness_repo, mode):
+    # US1 (no fail-open path), as FR-015 for policy.sh: a lib.sh that loads
+    # but defines no helpers must not end the turn or the edit green with no
+    # ruff or pytest run (each helper would just return 127).
+    repo = harness_repo
+    (repo / "pkg" / "new.py").write_text("VALUE = 1\n")
+    (repo / ".claude" / "hooks" / "lib.sh").write_text("GATE_LIMIT=240\n")
+
+    result = stop(repo) if mode == "stop" else _py_check_edit(repo, "pkg/new.py")
+
+    assert result.returncode == 2
+    assert "py-check.sh: cannot load lib.sh" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["stop", "edit"])
+def test_py_check_turns_an_unexpected_error_into_a_block(harness_repo, mode):
+    # US1, as FR-015 for policy.sh: any exit other than 0 or 2 (here set -u on
+    # an unset variable) is a non-blocking hook error, so the turn or the edit
+    # would pass with no verdict.
+    repo = harness_repo
+    (repo / "pkg" / "new.py").write_text("VALUE = 1\n")
+    with (repo / ".claude" / "hooks" / "lib.sh").open("a") as f:
+        f.write("unset failures\n")
+
+    result = stop(repo) if mode == "stop" else _py_check_edit(repo, "pkg/new.py")
+
+    assert result.returncode == 2
+    assert "py-check.sh stopped on an unexpected error (exit 1)" in result.stderr
+
+
+def test_gate_step_returns_when_a_leftover_child_holds_its_output(harness_repo):
+    # FR-003: a step that exits but leaves a background child with its stdout
+    # open must not hold the gate until that child ends.
+    repo = harness_repo
+    pidfile = repo.parent / "child.pid"
+    script = (
+        '. "$1"; gate_start; '
+        'run_check step bash -c "sleep 30 & echo \\$! >\\"$2\\"; exit 0"; '
+        'printf "outcome=[%s]" "$gate_outcome"'
+    )
+    env = _clean_env()
+    env["PATH"] = f"{repo.parent / 'bin'}{os.pathsep}{env['PATH']}"
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "_", str(repo / ".claude" / "hooks" / "lib.sh"),
+             str(pidfile)],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+    finally:
+        if pidfile.exists():
+            subprocess.run(["kill", pidfile.read_text().strip()], check=False)
+    assert time.monotonic() - start < 5
+    assert result.stdout == "outcome=[]"
+
+
 def test_turn_start_prunes_stale_ctx_and_exception_files(harness_repo):
     repo = harness_repo
     sd = state_dir(repo)

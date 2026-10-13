@@ -99,6 +99,20 @@ Known gaps, recorded, not fixed (2026-10-12):
   it. The same holds for FR-014's rebase lookup. Judging each path against the
   worktree that owns it (`git -C <nearest existing parent> rev-parse --show-toplevel`)
   would close this; it widens AF-SPEC and is left to the operator.
+- **Turn that moves between worktrees** (T057 review, 2026-10-13). The turn snapshot
+  does not record the worktree it was taken in. If a turn starts in worktree A and
+  ends in B (`cd`, `EnterWorktree`), `Stop` runs in B: `resolve_snapshot` finds no
+  snapshot for this session there, adopts the oldest pending one of another session
+  in B, and judges B's tree, which may hold that session's red work. A's changes wait
+  for A's next turn. This sits under the one-session-per-worktree rule. Writing the
+  snapshot's `ROOT` into `turn-<key>.tsv` and refusing to adopt across roots would
+  close it.
+- **Twice-red baseline** (T057 review, 2026-10-13). Under FR-013 a kept snapshot has no
+  limit: every later turn runs the full gate and blocks once until the tree is green.
+  When it stays red for a reason the session cannot fix, the operator deletes
+  `$(git rev-parse --git-path claude-harness)/turn-<key>.tsv` (`<key>` is the
+  session ID, `session_key`) to drop it
+  (CLAUDE.md names this).
 
 ## Inputs (extends 010 "Inputs")
 
@@ -117,13 +131,23 @@ only the launcher reads it, as the second lookup. Each script sets
 
 - A missing `jq` or `git` still exits 2 with the 010 text.
 - `policy.sh` refuses with **AF-HOOKS on stderr and exit 2** when:
-  - `lib.sh` fails to load (missing file or syntax error);
+  - `lib.sh` fails to load (missing file or syntax error), or loads without the
+    helpers `policy.sh` calls (same message);
   - the repo root cannot be resolved (the `cd` to `<script dir>/../..` fails);
-  - the payload is empty, is not a JSON object, or has no string `tool_name`.
+  - the payload is empty, is not a JSON object, or has no string `tool_name`;
+  - `policy.sh` exits with any code other than 0 or 2 (an `EXIT` trap turns it into
+    exit 2 with `[AF-HOOKS] policy.sh stopped on an unexpected error (exit <n>), …`;
+    T057 review, 2026-10-13).
 
   There is no trusted input to answer in JSON, so this is the one deny that does not
   use 010's JSON shape. Claude Code shows stderr to the model and blocks the call.
 - All other denies keep 010's JSON `permissionDecision: "deny"` with exit 0.
+- `py-check.sh` treats a `lib.sh` that loads without its helpers (or without
+  `TURN_PATHS`) as not loaded: `turn-start` exits 0, `edit` and `stop` print
+  `py-check.sh: cannot load lib.sh` and exit 2. In `edit` and `stop`, any other exit
+  than 0 or 2 is turned into exit 2 by an `EXIT` trap (`py-check.sh stopped on an
+  unexpected error (exit <n>) …`), so a broken hook blocks instead of letting the edit
+  or the turn through unchecked (T057 review, 2026-10-13).
 
 ### `turn-start` (extends 010)
 
@@ -191,8 +215,11 @@ read from that branch's tip, and the spec dir line says
 
 ## Rule messages (amends 010 "Rule messages")
 
-Every first line still matches `^\[AF-[A-Z]+\] .+\. To proceed: .+$`. No message
-contains a `'`: the launcher prints its message inside a single-quoted `sh` string.
+Every first line still matches `^\[AF-[A-Z]+\] .+\. To proceed: .+$`, with one
+exception: the `policy.sh` unexpected-error refusal comes from an `EXIT` trap, so
+bash's own error lines come first and the `[AF-HOOKS]` line is the last stderr line
+(T057 review, 2026-10-13). No message contains a `'`: the launcher prints its message
+inside a single-quoted `sh` string.
 
 | ID | Case | First line |
 |---|---|---|
@@ -200,6 +227,7 @@ contains a `'`: the launcher prints its message inside a single-quoted `sh` stri
 | AF-HOOKS | input empty or invalid | `[AF-HOOKS] The repo policy hook got no valid input, so it cannot judge this call. To proceed: retry the call; if it repeats, restart the session and report it.` |
 | AF-HOOKS | repo root not resolved (`policy.sh`) | `[AF-HOOKS] policy.sh cannot resolve the repo root from <script path>, so this call cannot be checked. To proceed: check that the worktree directory exists and can be entered, or start a new Claude Code session in an existing worktree of this repo.` |
 | AF-HOOKS | `lib.sh` not loaded | `[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD -- .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git merge --abort first, or fix the conflict or syntax error in an editor), then retry.` |
+| AF-HOOKS | `policy.sh` unexpected error (any exit other than 0 or 2) | last stderr line, not first: `[AF-HOOKS] policy.sh stopped on an unexpected error (exit <n>), so this call is refused. To proceed: read the error above, restore .claude/hooks/ from a terminal outside Claude Code with git checkout HEAD -- .claude/hooks if it was changed, then retry.` |
 | AF-SECRET | Read, Grep, Glob | unchanged from 010 |
 | AF-SECRET | Bash (**new**, `MSG_SECRET_SHELL`) | `[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold live credentials, and reading, writing or copying them from the shell is refused. To proceed: use .env.example for variable names and ask the operator for any value you need. If the command only mentions the name as text (a commit message, a search string), write that text to a file and pass the file (git commit -F <file>, grep -f <file>), or ask the operator.` |
 | AF-COMMIT | red run (verbs widened) | `[AF-COMMIT] git commands that write commits (commit, revert, cherry-pick, merge, am, rebase, pull) require ruff (whole repo) and both pytest suites to be green. To proceed: fix the failures below, then run the command again.` |

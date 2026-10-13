@@ -47,7 +47,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 **Purpose**: Start from current `main`, record baselines, and get the design reviewed before you build.
 
 - [X] T001 Commit the 012 design docs on branch `worktree-012-dev-harness-followups`. The files are `specs/012-dev-harness-followups/{spec.md,plan.md,research.md,data-model.md,quickstart.md,tasks.md,contracts/,checklists/}` and `.specify/feature.json`. Message: `docs(012): plan and tasks`. This is a docs-only commit, so the reviewer agents are skipped; say so in the report.
-- [ ] T002 Rebase onto the new `main` with `git fetch origin && git rebase origin/main`. PR #6 (feature 013, merge commit `91e1af0`, merged 2026-10-12) changed `CLAUDE.md` (the swe-agent row), `harness/swe-agent/SKILL.md`, `registry/agents/swe-agent/SKILL.md` and `orchestration/{activities.py,worker.py,webhook_bridge/github_app.py}`. Resolve any conflict in favour of `main`, then re-read those three docs before T033 (SKILL.md) and T056 (CLAUDE.md). The orchestration test line numbers in T050 may have shifted after the rebase; find them again by grep. Run `git log --oneline origin/main..HEAD` and confirm only your own commits are listed.
+- [X] T002 Rebase onto the new `main` with `git fetch origin && git rebase origin/main`. PR #6 (feature 013, merge commit `91e1af0`, merged 2026-10-12) changed `CLAUDE.md` (the swe-agent row), `harness/swe-agent/SKILL.md`, `registry/agents/swe-agent/SKILL.md` and `orchestration/{activities.py,worker.py,webhook_bridge/github_app.py}`. Resolve any conflict in favour of `main`, then re-read those three docs before T033 (SKILL.md) and T056 (CLAUDE.md). The orchestration test line numbers in T050 may have shifted after the rebase; find them again by grep. Run `git log --oneline origin/main..HEAD` and confirm only your own commits are listed.
 - [X] T003 Check the tools and record what is missing in `specs/012-dev-harness-followups/quickstart.md` under "Prerequisites": `command -v jq git uv shellcheck`, `command -v timeout || command -v gtimeout`, and `claude --version` (2.1.285 is expected; `onFailure` is not used). If `timeout`/`gtimeout` is missing, stop and ask the operator to run `brew install coreutils`. If `shellcheck` is missing, ask for `brew install shellcheck` (T048 would otherwise skip).
 - [X] T004 Record the lockfile baseline (SC-009, FR-025): `shasum uv.lock orchestration/uv.lock > "$SCRATCH/af-lock-before"`, where `$SCRATCH` is the session scratchpad directory.
 - [X] T005 Run the baseline gate one step at a time: `uv run --locked ruff check .`, then `uv run --locked pytest tests/ -q`, then `cd orchestration && uv run --locked pytest -q`. Record each step's pass count and wall time. The values seen while planning were 271 passed in 26 s and 167 passed in 27 s; the counts after T002 may differ. All three steps must be green before you go on.
@@ -360,7 +360,7 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T056 Update the harness section of `CLAUDE.md` (FR-024):
+- [X] T056 Update the harness section of `CLAUDE.md` (FR-024):
   - Describe the launcher, and that hooks resolve from the session's worktree.
   - Add an AF-HOOKS row to the Repo-rules table.
   - List the gated git verbs in the AF-COMMIT row.
@@ -371,13 +371,13 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
   - Add two "Known gaps" bullets from the hook contract (T006 review): a session whose own working directory was removed runs no hooks at all (fixed only by `onFailure` from Claude Code 2.1.295), so do not remove the worktree a session is in; and AF-SPEC does not judge edits in another worktree or in the main checkout.
 
   Keep the swe-agent row as merged by PR #6, and add only the "harness commits" wording. Run `uv run --locked pytest tests/test_context_drift.py -q` (green).
-- [ ] T057 Reviews, in parallel and in the background: `shell-reviewer` on `.claude/hooks/*.sh` and the settings.json launcher strings; `py-codereviewer` on `tests/test_harness_hooks.py`, `tests/test_context_drift.py`, `tests/test_swe_agent_seat.py`, `harness/swe-agent/agent.py`, `orchestration/conftest.py` and `orchestration/tests/test_temporal_marker_guard.py`; `senior-architect-reviewer` on the finished feature (contract change). Fix confirmed findings and re-run once. Record each rejected finding, with its reason, in the PR description.
+- [X] T057 Reviews, in parallel and in the background: `shell-reviewer` on `.claude/hooks/*.sh` and the settings.json launcher strings; `py-codereviewer` on `tests/test_harness_hooks.py`, `tests/test_context_drift.py`, `tests/test_swe_agent_seat.py`, `harness/swe-agent/agent.py`, `orchestration/conftest.py` and `orchestration/tests/test_temporal_marker_guard.py`; `senior-architect-reviewer` on the finished feature (contract change). Fix confirmed findings and re-run once. Record each rejected finding, with its reason, in the PR description.
 - [ ] T058 Live operator checks V1 and V2 from `quickstart.md`. These are operator-only, because they remove a worktree and hang a gate in a real session. Record the results in the PR description. V1 is SC-001: a removed launch worktree gives a deny or an AF-HOOKS notice. V2: a real commit with `AF_GATE_LIMIT=5` is denied as timed out.
-- [ ] T059 Run quickstart V6, V8 and V9:
+- [X] T059 Run quickstart V6, V8 and V9:
   - V6: run the full root and orchestration suites one at a time, and record the counts.
   - V8: the swe-agent tests, the Temporal guard and shellcheck.
   - V9: `shasum -c "$SCRATCH/af-lock-before"`. Both lockfiles must be unchanged (SC-009, FR-025), and `git diff --stat origin/main -- '*uv.lock' '*pyproject.toml'` must be empty.
-- [ ] T060 Traceability check (SC-007, SC-008). For each of the 21 in-scope items in `spec.md`'s traceability table, write the task ID and test name that covers it into a new "Coverage" section at the end of this file. List every existing test changed, with the FR named in its comment (T014, T015, T026, T036, T037, T038, T050). Tick every task above.
+- [X] T060 Traceability check (SC-007, SC-008). For each of the 21 in-scope items in `spec.md`'s traceability table, write the task ID and test name that covers it into a new "Coverage" section at the end of this file. List every existing test changed, with the FR named in its comment (T014, T015, T026, T036, T037, T038, T050). Tick every task above.
 
 ---
 
@@ -454,3 +454,50 @@ After Phase 2: one agent takes the hook chain (US1 → US2 hooks → US3 → US4
 - Never read `.env` or `.env.braintrust` (AF-SECRET). Test fixtures use synthetic names inside tmp repos.
 - `/clear` between stories. The `specs/012-dev-harness-followups/` directory and the ticked boxes here are the handoff.
 - Before any push, run `git log --oneline origin/<branch>..<branch>` and check for commits you did not make (shared repo).
+
+---
+
+## Coverage
+
+Written by T060 on 2026-10-13. Each of the 21 in-scope items in `spec.md`'s traceability table, with the tasks that close it and the tests that prove it. Every test named here was checked against a `def test_` in the file, and all of them pass in the T059 runs: root suite 460 passed, orchestration suite 196 passed. Updated after the T057 fix round (2026-10-13): root suite 469 passed, orchestration suite 196 passed. Files: hooks = `tests/test_harness_hooks.py`, swe = `tests/test_swe_agent_seat.py`, drift = `tests/test_context_drift.py`, guard = `orchestration/tests/test_temporal_marker_guard.py`.
+
+| Item | FR | Tasks | Tests (or contract) |
+|---|---|---|---|
+| (1) AF-COMMIT vs. sandbox prompt | FR-011 | T026, T027, T031, T032, T033, T056 | swe: `test_prompt_carries_resume_and_checkpoint_rules`, `test_task_and_feedback_prompts_do_not_ask_to_commit`, `test_failed_harness_commit_is_not_reported_as_no_change`, `test_pr_body_has_verification_notes_after_one_session`, `test_notes_go_to_a_comment_when_the_pr_exists`, `test_notes_are_fenced`, `test_per_task_notes_keep_task_order`, `test_notes_are_capped`, `test_notes_with_fences_are_capped_after_escaping`, `test_notes_do_not_publish_tokens`, `test_notes_are_omitted_when_empty`, `test_notes_comment_warns_when_the_pr_lookup_finds_none`, `test_failed_final_harness_commit_fails_the_run` (T057) |
+| (2) AF-SECRET contract ruling | FR-006 | T025, T030, T034 | Contract: `contracts/hook-interface.md` "Matching rules". hooks: new rows in `_SECRET_DENIED`/`_SECRET_ALLOWED` (the whole glob is checked), run by `test_secret_reads_are_denied` and `test_non_secret_reads_are_allowed` |
+| (3) AF-SPEC `..`/case gap | FR-008 | T024, T028, T029 | hooks: `test_path_spellings_are_normalised`, `test_climbing_out_and_back_into_the_root_is_guarded`, `test_dotdot_at_the_filesystem_root_stays_there` |
+| (4) Extractor rulings | FR-018, FR-019 | T055 | Contract: `contracts/drift-conventions.md` (extractor rules as shipped), with the pointer line in `specs/010-dev-harness-hardening/contracts/drift-conventions.md`. The drift suite stays green against it |
+| (5.1) Gate overrun past the hook time limit | FR-003 | T011, T018, T021 | hooks: `test_gate_limit_is_clamped`, `test_gate_steps_share_one_deadline`, `test_gate_timeout_denies_the_commit`, `test_gate_without_a_timeout_tool_denies`, `test_gate_limit_is_below_the_hook_timeouts`, `test_gate_step_returns_when_a_leftover_child_holds_its_output` (T057) |
+| (5.2) Missing `uv` blocks every Stop retry | FR-012 | T036, T042 | hooks: `test_missing_uv_fails_closed_only_where_uv_runs` (changed, see below) |
+| (5.3) Second red Stop deletes the snapshot | FR-013 | T037, T042 | hooks: `test_red_blocks_once_then_lets_go_with_a_notice` (changed), `test_double_red_keeps_the_baseline_for_the_next_turn`, `test_double_red_still_blocks_a_docs_only_next_turn` |
+| (5.4) AF-SECRET wording for shell writes | FR-007 | T025, T030 | hooks: `test_shell_secret_message_says_naming`, `test_secret_reads_are_denied` (new rows) |
+| (5.5) Shell secret check: case and delimiters | FR-009 | T025, T030 | hooks: `test_secret_reads_are_denied`, `test_non_secret_reads_are_allowed` (new rows only) |
+| (5.6) Pruning `ctx-*.level`, `exception-*.notified` | FR-016 | T040, T044 | hooks: `test_turn_start_prunes_stale_ctx_and_exception_files`, `test_turn_start_survives_a_read_only_state_dir` |
+| (5.7) No shell lint gate | FR-023 | T048, T054, T047, T052 | hooks: `test_hook_scripts_pass_shellcheck`, `test_hook_or_settings_turn_runs_the_full_gate` |
+| (5.8) Unloadable hook library denies everything | FR-015 | T039, T044 | hooks: `test_policy_without_lib_names_the_recovery`, `test_policy_with_an_incomplete_lib_fails_closed`, `test_policy_turns_an_unexpected_error_into_a_deny`, `test_py_check_with_an_incomplete_lib_fails_closed`, `test_py_check_turns_an_unexpected_error_into_a_block` (T057) |
+| (5.9) D-ID corpus reads untracked and ignored files | FR-020 | T046, T051 | drift: `test_ignored_file_is_not_in_the_corpus` |
+| (5.10) `temporal` mark check | FR-022 | T049, T050, T053 | guard: `test_unmarked_connect_fails_and_marked_connect_skips`. The full orchestration suite passing under the new `orchestration/conftest.py` guard proves every live-Temporal test is marked (T050) |
+| (5.11) AF-SPEC during a rebase conflict | FR-014 | T038, T043 | hooks: `test_rebase_on_a_planned_branch_allows_guarded_edits`, `test_rebase_reads_tasks_from_the_branch_tip`, `test_rebase_of_an_unplanned_branch_is_denied`, `test_session_context_names_the_branch_during_a_rebase`, `test_rebase_resume_block_follows_the_tip_tasks_dir`, `test_branch_tip_tasks_count_only_during_a_rebase`. The hand-run quickstart V5 is still open (T045) |
+| (5.12) Docs-only edits skip the drift test at Stop | FR-021 | T047, T052 | hooks: `test_docs_turn_runs_only_the_drift_test`, `test_hook_or_settings_turn_runs_the_full_gate`, `test_both_tiers_changed_runs_the_full_gate_once`, `test_old_snapshot_runs_the_full_gate_once`, `test_non_ascii_py_on_head_fallback_runs_the_full_gate` |
+| (5.13) Repo root after a mid-session worktree change | FR-002 | T007, T008, T022 | hooks: `test_root_comes_from_the_script_not_the_env`, `test_no_hook_script_reads_claude_project_dir`, `test_policy_and_edit_fail_closed_without_a_root`, `test_policy_without_a_root_is_an_af_hooks_deny`, `test_turn_start_without_a_root_keeps_the_prompt`, `test_launcher_finds_scripts` |
+| (5.14) AF-COMMIT misses other commit-making commands | FR-005 | T013, T014, T020 | hooks: `test_commit_making_verbs_are_gated`, `test_exempt_verbs_run_no_gate`, `test_pull_ff_only_is_gated_when_pull_rebase_is_set`, `test_af_commit_message_names_the_verbs`, `test_non_commit_commands_run_no_gate` (changed) |
+| (5.15) Policy allows on empty input | FR-004 | T012, T019 | hooks: `test_policy_denies_empty_or_invalid_input` |
+| (5.16) Stale context warning after compaction | FR-017 | T041, T044 | hooks: `test_context_after_compaction_with_no_usage_is_silent`, `test_context_after_compaction_rearms_on_low_usage` |
+| (6) Policy failed open after the launch worktree was removed | FR-001, FR-002 | T015, T016, T022 | hooks: `test_every_hook_uses_the_launcher`, `test_policy_hook_covers_every_guarded_tool`, `test_launcher_finds_scripts`, `test_launcher_without_scripts_fails_safe`. The live proof (SC-001, quickstart V1) is operator-only: T058 |
+
+CLAUDE.md states the new behaviour for all of the above (T056, FR-024). `tests/test_context_drift.py` judges it and passes.
+
+### Existing tests changed (SC-008)
+
+Each change only adds or tightens an assertion where a requirement here changes the behaviour, and names the FR in a comment. Found with `git diff origin/main -- tests/ orchestration/`.
+
+- T009 (not in T060's list, found by the diff): the `assert_denied` helper (hooks) splits its one first-line check into the shared `DENY_FORMAT` match plus a `[<rule>] ` prefix check. The check is the same, now shared by every deny, `# 012 data-model validation (T009)`.
+- T014: `test_non_commit_commands_run_no_gate` (hooks) gets the `echo rebase` row, `# FR-005`.
+- T015: `test_settings_wire_every_hook` (hooks) is replaced by `test_every_hook_uses_the_launcher`, `# FR-001`. `test_settings_wire_context_continuity_and_cap` moves its command check to the launcher test, `# FR-001`.
+- T025: `_SECRET_DENIED` and `_SECRET_ALLOWED` (hooks) only get new rows, `# 012 FR-006`, `FR-007` and `FR-009`. No existing row was edited.
+- T026: `test_prompt_carries_resume_and_checkpoint_rules` (swe) no longer asserts `git add -A && git commit`, `# FR-011`. The fake `push_and_open_pr` in `_stub_pr`, `_capture_log` and `test_checkpoint_uses_fallback_identity_when_none_is_configured` takes the new `notes` argument, `# FR-011`.
+- T036: `test_missing_uv_fails_closed_only_where_uv_runs` (hooks), stop path, `# FR-012`. The edit-mode assertions are unchanged.
+- T037: `test_red_blocks_once_then_lets_go_with_a_notice` (hooks), the last line asserts the snapshot stays, `# FR-013`.
+- T038: `_RULES` (hooks, used by `test_compact_on_a_feature_branch_injects_where_to_resume`) gains `AF-HOOKS`, `# FR-014`.
+- T050: no existing test changed. Every function that reaches `_connect_or_skip` already had the `temporal` mark. The diff under `orchestration/` holds only the new `conftest.py` and the new guard test.
+- T051: the `_corpus` and `_tree` helpers in drift build the corpus from `git ls-files` (FR-020). No test assertion changed.

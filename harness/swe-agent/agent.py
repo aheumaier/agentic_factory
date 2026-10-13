@@ -278,16 +278,18 @@ class TaskCheckpointer:
         if self._commit("checkpoint: " + (" ".join(ids) or "tasks")):
             self.saved.update(new)
 
-    def finish(self, what: str = "run") -> None:
+    def finish(self, what: str = "run") -> bool:
         """After a normal stream end (of the run, or of one task's session):
         checkpoint new ticks, then commit any edits made after the last one
-        (verification fixes) as `checkpoint: end of <what>`."""
+        (verification fixes) as `checkpoint: end of <what>`. True once
+        nothing is left uncommitted."""
         self()
-        self._commit(f"checkpoint: end of {what}")
+        return self._commit(f"checkpoint: end of {what}", retry=what != "run")
 
-    def _commit(self, message: str) -> bool:
+    def _commit(self, message: str, retry: bool = True) -> bool:
         """Commit everything if the tree is dirty. True once nothing is left
-        uncommitted; a failure goes to stderr (stdout is the seat protocol)."""
+        uncommitted; a failure goes to stderr (stdout is the seat protocol).
+        `retry` is False for the run's final commit, which nothing retries."""
         try:
             if not _run(["git", "status", "--porcelain"], cwd=self.checkout):
                 return True
@@ -296,7 +298,8 @@ class TaskCheckpointer:
                  cwd=self.checkout)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"checkpoint commit failed, will retry: {e.stderr}", file=sys.stderr)
+            then = ", will retry" if retry else ""
+            print(f"checkpoint commit failed{then}: {e.stderr}", file=sys.stderr)
             return False
 
 
@@ -451,7 +454,8 @@ def verify_new_commit(checkout: Path, sha_before: str) -> None:
             raise RuntimeError(
                 "Agent made no new commit — nothing to push: the harness's "
                 "commit failed (see the checkpoint stderr above), so the work "
-                "is uncommitted. Inspect the run manually."
+                "is uncommitted and is lost with the checkout. Fix that cause, "
+                "then rerun."
             )
         raise RuntimeError(
             "Agent made no new commit — nothing to push: the harness "
@@ -528,10 +532,11 @@ def push_and_open_pr(
                      "--body-file", str(body_path)],
                     cwd=checkout,
                 )
-            except subprocess.CalledProcessError as ce:
+            except (subprocess.CalledProcessError, RuntimeError) as ce:
+                # RuntimeError: verify_pr_exists found no PR to comment on.
                 print(
                     "warning: could not post the verification notes: "
-                    f"{(ce.stderr or '').strip()}",
+                    f"{(getattr(ce, 'stderr', None) or str(ce)).strip()}",
                     file=sys.stderr,
                 )
         return e.stderr.strip()
@@ -586,13 +591,24 @@ async def run(
             checkpoint_push(checkout, branch, sha_before)
             raise
         verify_left_main(checkout, branch)
-        checkpointer.finish()
+        committed = checkpointer.finish()
         # A successor seat (specs/011 F5) with every task done may find its
         # predecessor already committed and pushed this attempt's work — e.g.
         # a Gate-feedback fix. With tasks still open, no commit means no work:
         # fail as on the first seat (the Eval-Gate never looks at the diff).
         if _handoff_index() == 0 or has_open_tasks(checkout, branch):
             verify_new_commit(checkout, sha_before)
+        if not committed:  # specs/012 FR-011: no PR for partial work
+            # The checkout dies with the sandbox, so the task checkpoints
+            # already made are pushed (as on a seat outcome) for the next
+            # attempt to resume from; the uncommitted rest is lost.
+            checkpoint_push(checkout, branch, sha_before)
+            raise RuntimeError(
+                "The harness's final commit failed (see the checkpoint stderr "
+                f"above). The commits made before it were pushed to {branch} "
+                f"(now at {_head_sha(checkout)[:12]}); the edits after the last "
+                "one are lost with the checkout, and no PR was opened."
+            )
     title = f"Implement {branch}"
     push_and_open_pr(checkout, repo, branch, title, notes=notes)
     return verify_pr_exists(repo, branch)

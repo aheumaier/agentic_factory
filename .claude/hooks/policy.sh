@@ -20,8 +20,9 @@
 #               timeout or no timeout tool denies it. Only `<verb> --abort|--quit`
 #               and a plain `git pull --ff-only` are exempt (012 R5).
 # A deny is a permissionDecision JSON on stdout with exit 0; a missing
-# jq/git/uv, or an [AF-HOOKS] case (lib.sh that cannot be loaded, repo root
-# that cannot be resolved, empty or invalid input), is exit 2 (fail closed). AF-REGISTRY and AF-HARNESS are
+# jq/git/uv, or an [AF-HOOKS] case (lib.sh that cannot be loaded or lacks its
+# helpers, repo root that cannot be resolved, empty or invalid input, any exit
+# other than 0 or 2), is exit 2 (fail closed). AF-REGISTRY and AF-HARNESS are
 # permissions.ask rules in settings.json, not checks here.
 #
 # Documented gaps: shell writes under guarded dirs are not pre-checked
@@ -31,9 +32,16 @@
 # by specs/012-dev-harness-followups/contracts/hook-interface.md.
 # shellcheck source-path=SCRIPTDIR
 set -uo pipefail
+# 012 FR-015: any exit other than 0 or 2 is a non-blocking hook error, which
+# would let the call through, so it becomes an AF-HOOKS refusal.
+trap 'rc=$?; [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || { echo "[AF-HOOKS] policy.sh stopped on an unexpected error (exit $rc), so this call is refused. To proceed: read the error above, restore .claude/hooks/ from a terminal outside Claude Code with git checkout HEAD -- .claude/hooks if it was changed, then retry." >&2; exit 2; }' EXIT
 
-# 012 FR-015: bash's own error is dropped so the deny line comes first.
-if ! . "$(dirname "$0")/lib.sh" 2>/dev/null; then
+# 012 FR-015: bash's own error is dropped so the deny line comes first. A
+# lib.sh that loads without the helpers counts as not loaded: each call would
+# return 127 and the call would go through.
+if ! . "$(dirname "$0")/lib.sh" 2>/dev/null \
+  || ! declare -F gate_start require_tools run_check run_suites state_dir session_key \
+    rel_path feature_branch feature_number tip_tasks >/dev/null; then
   echo "[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD -- .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git merge --abort first, or fix the conflict or syntax error in an editor), then retry." >&2
   exit 2
 fi
@@ -79,7 +87,8 @@ field() {
 deny() {
   jq -n --arg r "$1" \
     '{hookSpecificOutput: {hookEventName: "PreToolUse",
-      permissionDecision: "deny", permissionDecisionReason: $r}}'
+      permissionDecision: "deny", permissionDecisionReason: $r}}' \
+    || { printf '%s\n' "$1" >&2; exit 2; }  # no JSON: refuse by exit code
   exit 0
 }
 

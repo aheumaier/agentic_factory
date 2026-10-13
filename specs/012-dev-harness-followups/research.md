@@ -783,3 +783,61 @@ Review of T046-T055 (Phase 6, User Story 4), 2026-10-13.
   (`python_fingerprint` hides that it also covers docs and hook files). Renamed
   to `turn_fingerprint` in this round, not in T056, because lib.sh and
   py-check.sh were already being changed for the finding above.
+
+Review of T056-T060 (Phase 7) / T057, 2026-10-13.
+
+- **shell-reviewer, `.claude/settings.json:25`: the launcher strings trust
+  whatever `.claude/hooks/` holds.** Rejected. It names a trust boundary, not a
+  defect: the hook scripts are repo code, and their edits ask first
+  (AF-HARNESS). The live checks of the launcher path are V1/V2 (T058), which
+  are operator-only.
+- **senior-architect-reviewer, `.claude/hooks/py-check.sh:35`: a missing lib.sh,
+  `jq` or `git` blocks every Stop.** Rejected. The contract's Stop step 3 accepts
+  that a missing `jq` or `git` "still blocks every Stop", and the Phase 5 review
+  (`py-check.sh:27` above) already ruled it a contract change and a follow-up
+  candidate. No new fact.
+- **senior-architect-reviewer, `specs/012-dev-harness-followups/tasks.md`: T045
+  is open and the doc changes are not committed.** Rejected as out of scope for
+  this round. T045 is a Phase 5 task, and the workflow commits. T045 stays open.
+- **senior-architect-reviewer, `.claude/hooks/policy.sh:163`: the seven-verb
+  match gives false positives.** Rejected. R5 decided the verb list and its
+  trade-off; the finding brings no new fact.
+- **senior-architect-reviewer, `tests/test_context_drift.py:72`: the drift test
+  needs a `.git`.** Rejected. No consumer runs the suites outside a git
+  checkout: the hooks run in a worktree, and the sandbox clones the repo.
+- **senior-architect-reviewer, `harness/swe-agent/agent.py:295`: a target repo's
+  pre-commit hook can reject the harness's checkpoint commits.** Rejected for
+  this round, open for the operator: skip hooks (`--no-verify`), or pass the
+  hook's stderr into the Gate feedback. Since the `agent.py:589` fix in this
+  round, a rejected final commit fails the run with the hook's stderr shown,
+  instead of pushing partial work.
+- **Not rejected, documented:** senior-architect-reviewer `.claude/hooks/lib.sh:191`
+  (a turn that moves between worktrees) and `.claude/hooks/py-check.sh:234` (a
+  twice-red snapshot has no escape) are now known gaps in
+  `contracts/hook-interface.md` and CLAUDE.md, with the manual escape (delete
+  `turn-<session>.tsv`). `orchestration/conftest.py:14` (function-scoped guard)
+  is now the "limit" row of the Temporal marker guard in `data-model.md`.
+
+Review of T057 fix round, 2026-10-13.
+
+- **T057 review (marked uncertain), `harness/swe-agent/agent.py:294`: a
+  dirty submodule keeps `git status --porcelain` non-empty, so the harness's
+  commits keep "failing".** Rejected. `clone_and_checkout` (`agent.py:147`) is
+  a plain `git clone` with no `--recurse-submodules`, so no submodule has a
+  working tree unless the model initialises one and edits inside it. The
+  harness cannot stage or push such edits, and `--ignore-submodules=dirty`
+  would report success while dropping them, which FR-011 forbids. Failing
+  loudly is the intended result. Not reproduced: the session sandbox blocks
+  git outside the worktree.
+- **Not rejected, documented:** shell-reviewer `.claude/hooks/policy.sh:36` and
+  py-codereviewer `contracts/hook-interface.md:212` (the same finding): the
+  unexpected-error refusal comes from an `EXIT` trap, so its `[AF-HOOKS]` line
+  is the last stderr line, not the first. Bash prints its own error before the
+  trap runs, so the order cannot change. The exception is now written in
+  `contracts/hook-interface.md` (Rule messages), `data-model.md` and the
+  `policy.sh` header.
+- **Fixed in this round (T057 review):** `py-check.sh` failed open on a `lib.sh`
+  without its helpers and on any exit other than 0 or 2; a failed final harness
+  commit printed "will retry"; a failed final harness commit dropped the task
+  checkpoints with the sandbox (senior-architect-reviewer; they are now pushed
+  first); the Coverage table in `tasks.md` missed this round's tests.

@@ -38,7 +38,7 @@ Nothing here is wired end-to-end. Each layer directory is a scaffold with
 | -------------------- | ------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Spec/Intake          | `.specify/` + `specs/`    | GitHub Spec Kit                      | **Official flow — the old bespoke `spec/` schema/triage-policy design is retired, not supported.** `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` produce `specs/NNN-slug/`; enforced at runtime by `swe-agent`'s `verify_spec_exists()`.                                                                                           |
 | Harness/Runtime      | `harness/template-agent/` | Claude Agent SDK (Python)            | `agent.py` is a stub `query()` call, no tool binding                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Harness/Runtime      | `harness/swe-agent/`      | Claude Agent SDK (Python) + Spec Kit | Real, implement-only agent: implements a pre-planned feature branch, one model session per open task (specs/011 F7-a; a Gate-feedback retry, an ID-less task or several task files keep one `/speckit-implement` session), commits, pushes, opens a PR. Registered in `registry/agents/swe-agent/`. See its `SKILL.md` for deferred scope. On the Temporal path it runs on a credential-pool seat (`CLAUDE_CODE_OAUTH_TOKEN`, specs/009-credential-pool-handoff): the harness itself commits a `checkpoint: <task IDs>` each time the model ticks a task `[X]` (specs/011, not left to the model), and on a seat outcome pushes its commits and exits 75 (exhausted) / 77 (invalid), so the next seat resumes from the pushed checkpoint; a successor (`SEAT_HANDOFF_INDEX` > 0) with no task left open skips the "no new commit" check. The sandbox's `GH_TOKEN` is a GitHub App installation token minted per sandbox for the target repo only (contents and pull requests write, metadata read; specs/013-sandbox-app-token), so the agent's PRs are authored by the App's bot and a failed mint fails the run with `SandboxTokenMintFailed`, never falling back to the worker's own `GH_TOKEN`. Internal, single-operator use only (spec.md's Usage Constraint).                                                                                                                                                                                                                                                                                 |
+| Harness/Runtime      | `harness/swe-agent/`      | Claude Agent SDK (Python) + Spec Kit | Real, implement-only agent: implements a pre-planned feature branch, one model session per open task (specs/011 F7-a; a Gate-feedback retry, an ID-less task or several task files keep one `/speckit-implement` session), commits, pushes, opens a PR. Registered in `registry/agents/swe-agent/`. See its `SKILL.md` for deferred scope. On the Temporal path it runs on a credential-pool seat (`CLAUDE_CODE_OAUTH_TOKEN`, specs/009-credential-pool-handoff): the harness itself commits a `checkpoint: <task IDs>` each time the model ticks a task `[X]` (specs/011, not left to the model), and on a seat outcome pushes its commits and exits 75 (exhausted) / 77 (invalid), so the next seat resumes from the pushed checkpoint; a successor (`SEAT_HANDOFF_INDEX` > 0) with no task left open skips the "no new commit" check. The harness commits, the model reports (specs/012 FR-011): no prompt asks the model to commit, so every commit on that path is the harness's own, and the model's final account of its checks reaches the PR as "Agent verification notes" (in the PR body, or as a PR comment when the PR already exists). The sandbox's `GH_TOKEN` is a GitHub App installation token minted per sandbox for the target repo only (contents and pull requests write, metadata read; specs/013-sandbox-app-token), so the agent's PRs are authored by the App's bot and a failed mint fails the run with `SandboxTokenMintFailed`, never falling back to the worker's own `GH_TOKEN`. Internal, single-operator use only (spec.md's Usage Constraint).                                                                                                                                                                                                                                                                                 |
 | Harness/Runtime      | `harness/pm-agent/`       | Claude Agent SDK (Python)            | Real, two independently callable capabilities in one `agent.py`: `shape_issue()` (zero bound tools, direct-to-Anthropic — target-repo GitHub-hosted runner can't reach the LiteLLM proxy) and `review_spec()` (`Read`/`Grep`/`Glob` only, `setting_sources=[]`, `GH_TOKEN`/`GITHUB_TOKEN` popped from the parent process for the model call, LiteLLM-routed). Registered in `registry/agents/pm-agent/`. See its `SKILL.md` for known gaps (no `pr_url` producer, no Temporal wiring). |
 | Harness/Runtime      | `harness/architect-agent/` | Claude Agent SDK (Python)          | Real, one stage entrypoint `run_architect_stage()` (`specs/004-architect-fanout-judge`) sequencing fan-out (N candidates, `Read`/`Grep`/`Glob` only, no cross-candidate visibility, one process-wide credential-scrub window around all model calls since candidates run under `asyncio.gather`) → scoring (SC-NNN coverage map + 1-5 consistency rating, validated in Python) → synthesis (one winner, Python-computed via `pick_winner()`) → an independent completeness-critic (at most one gap round) → persist/push (code-side commit) → one idempotent-per-attempt PR comment. No E2B sandbox for any role (§6.1 carve-out). Registered in `registry/agents/architect-agent/`. See its `SKILL.md` for known gaps (Temporal-wired as a narrow plan-review slice of feature 005, not automatically gated, `MAX_PLAN_ATTEMPTS` not owned here). On seats (specs/009, `architect_stage_activity`'s `seat_id`) every model call runs direct to Anthropic on that seat's OAuth token; a seat outcome cancels sibling candidates and the whole stage re-runs on another seat. |
 | Execution Sandbox    | `sandbox/`                | E2B                                  | Real, and now the only execution path — both triggers (Temporal's `run_swe_agent_activity` via the `e2b` SDK, and the GitHub-comment path's `.github/workflows/swe-agent-build.yml` via `@e2b/cli`) run `agent.py` inside the `swe-agent-sandbox` template; no host-tempdir path remains                                                                                                                                                                                              |
@@ -84,45 +84,100 @@ per-edit lint uses `--frozen`), so nothing rewrites `uv.lock` or
 
 **Ruff and both pytest suites are enforced by Claude Code hooks**
 (`.claude/settings.json` → `.claude/hooks/py-check.sh` and
-`.claude/hooks/policy.sh`, feature 010):
+`.claude/hooks/policy.sh`, features 010 and 012):
 
+- **Launcher** (specs/012): every hook command in `.claude/settings.json` is a
+  short `sh` launcher. It runs the scripts of the worktree that holds the
+  session's current directory, and falls back to the launch directory
+  (`CLAUDE_PROJECT_DIR`). So hooks resolve from the session's worktree: a
+  session that moved into another worktree is judged by that worktree's
+  scripts and branch. If neither place has the scripts, a tool call is denied
+  with `[AF-HOOKS]`, and the other hook events show an `[AF-HOOKS]` notice.
+  The hook config itself is read once, at launch: a change to
+  `.claude/settings.json` applies from the next session.
 - **Per edit** (`PostToolUse`): ruff on the edited `.py` file only. No pytest.
 - **Per turn** (`UserPromptSubmit` + `Stop`): at the start of a turn the hook
-  snapshots every Python-relevant file (`*.py`, `*pyproject.toml`,
-  `*uv.lock`). A snapshot left by an interrupted turn is adopted after
-  `/clear`. At `Stop` the tree is diffed against that snapshot. Only if the
-  turn changed Python-relevant files (through any tool, shell commands
-  included) does it run ruff on the changed `.py` files and both suites. Red
-  blocks the stop once with the failures. If it is still red on the retry, the
-  turn ends with a notice instead of looping.
-- **Per commit** (AF-COMMIT): a Bash command containing `git` and `commit`
-  first runs whole-repo ruff and both suites. Red denies the commit.
+  snapshots two tiers of files. The full tier is `*.py`, `*pyproject.toml`,
+  `*uv.lock`, `.claude/hooks/*.sh` and `.claude/settings.json`. The drift tier
+  is `CLAUDE.md`, `.claude/agents/py-codereviewer.md`,
+  `registry/agents/*/manifest.yaml` and `specs/*/spec.md`. A snapshot left by
+  an interrupted turn is adopted after `/clear`. At `Stop` the tree is diffed
+  against that snapshot (changes through any tool, shell commands included).
+  A full-tier change runs ruff on the changed `.py` files and both suites. A
+  change in the drift tier alone runs only `tests/test_context_drift.py`, in
+  seconds. Red blocks the stop once with the failures. If it is still red on
+  the retry, the turn ends with a notice instead of looping, and the snapshot
+  is kept: every later turn is judged against the same baseline and blocks
+  once at `Stop` until the tree is green, a docs-only turn included. If the
+  tree stays red for a reason this session cannot fix, the operator can drop
+  that baseline by deleting
+  `$(git rev-parse --git-path claude-harness)/turn-<session id>.tsv`. A
+  missing `uv` also blocks a turn's stop only once.
+- **Per commit** (AF-COMMIT): a Bash command with `git` and one of `commit`,
+  `revert`, `cherry-pick`, `merge`, `am`, `rebase` or `pull` first runs
+  whole-repo ruff and both suites. Red denies the command. Not gated: the
+  plain `--abort` and `--quit` forms, and a plain `git pull --ff-only` while
+  `pull.rebase` is unset or `false`. `--continue` and `--skip` are gated. The
+  gate judges the tree before the command runs, so on a red tree make it
+  green first (for example `git checkout -- <file>`), then merge.
+- **Time limit**: the gate run at AF-COMMIT and at `Stop` is bounded at 240 s,
+  below the hooks' 300 s timeout. `AF_GATE_LIMIT` can lower it, never raise
+  it. A run that overruns is denied (AF-COMMIT) or reported red (`Stop`) as
+  timed out.
+- **Checks inside the suites**: the root suite runs `shellcheck` on the hook
+  scripts, and the orchestration suite fails a test that reaches live
+  Temporal without the `temporal` mark.
+
+**Prerequisites**: `jq`, `git`, `uv`, and GNU `timeout` or `gtimeout`
+(`brew install coreutils`). Without the timeout tool every gated git command
+is denied and every `Stop` with a change reports red. `shellcheck`
+(`brew install shellcheck`) is optional: without it the lint test is skipped,
+and the skip shows in the pytest summary.
 
 **Repo rules.** A refusal starts with its rule ID, e.g. `[AF-SPEC] … To
 proceed: …`. A permission prompt names its pattern.
 
 | ID | Mechanism | Covers | How to satisfy it |
 |---|---|---|---|
-| AF-SPEC | `policy.sh` (deny) | Edit/Write/MultiEdit/NotebookEdit under `harness/`, `orchestration/`, `eval/` | Work on a feature branch `NNN-slug` (or `worktree-NNN-slug`) that has `specs/NNN-*/tasks.md` |
-| AF-SECRET | `policy.sh` (deny) + `permissions.deny` `Read(/.env)`, `Read(/.env.braintrust)` | Read/Grep/Glob of `.env` or `.env.braintrust` in any directory; a Bash command naming either. `.env.example` is allowed | Read `.env.example` for names; ask the operator for values |
-| AF-COMMIT | `policy.sh` (deny) | `git commit` from Bash | Make ruff and both suites green, then commit again |
+| AF-SPEC | `policy.sh` (deny) | Edit/Write/MultiEdit/NotebookEdit under `harness/`, `orchestration/`, `eval/`, judged after resolving . and .. segments and folding the case of the top-level dir name | Work on a feature branch `NNN-slug` (or `worktree-NNN-slug`) that has `specs/NNN-*/tasks.md`. During a rebase, the branch being rebased counts, with the `tasks.md` on its tip |
+| AF-SECRET | `policy.sh` (deny) + `permissions.deny` `Read(/.env)`, `Read(/.env.braintrust)` | Read/Grep/Glob of `.env` or `.env.braintrust` in any directory and any letter case; a Bash command naming either. `.env.example` is allowed | Read `.env.example` for names; ask the operator for values |
+| AF-COMMIT | `policy.sh` (deny) | `git commit`, `revert`, `cherry-pick`, `merge`, `am`, `rebase` and `pull` from Bash (not their plain `--abort`/`--quit` forms, not a plain `git pull --ff-only`) | Make ruff and both suites green within the time limit, then run the command again |
 | AF-REGISTRY | `permissions.ask` `Edit(/registry/agents/*/manifest.yaml)`, `Edit(/registry/agents/*/versions/**)` | Edits to registry manifests and version files | The operator approves the prompt |
 | AF-HARNESS | `permissions.ask` `Edit(/.claude/settings.json)`, `Edit(/.claude/settings.local.json)`, `Edit(/.claude/hooks/**)` | Edits to the harness settings and hook scripts | The operator approves the prompt |
+| AF-HOOKS | launcher + `policy.sh` (deny, message on stderr) | Any covered call when the hook scripts are found neither in the session's worktree nor in the launch directory, when the policy hook gets empty or invalid input or stops on an unexpected error, or when `.claude/hooks/lib.sh` cannot be loaded or lacks its helpers | Start a new session in an existing worktree of this repo, or restore `.claude/hooks/` from a terminal outside Claude Code; for `lib.sh`, see below |
 
 The one exception: launch with `AF_SPEC_EXCEPTION="<reason>" claude`. It
 lifts AF-SPEC only, for that session, and is announced once. It never lifts
 AF-SECRET or AF-COMMIT.
 
+If `.claude/hooks/lib.sh` cannot be loaded (deleted, a syntax error, conflict
+markers), every covered tool call is denied with `[AF-HOOKS]`, Claude's own
+Bash calls included. Recover from a terminal outside Claude Code:
+`git checkout HEAD -- .claude/hooks/lib.sh`. In a rebase or merge stopped on a
+hook-file conflict, run `git rebase --abort` or `git merge --abort` first, or
+fix the file in an editor.
+
 Known gaps, by design:
 
 - Shell writes under `harness/`, `orchestration/` and `eval/` are not checked
-  before they run. The `Stop` gate still judges them (FR-013).
-- Shell reads of `.env` are denied by pattern match only, best effort. It is
-  not a security boundary (FR-016).
+  before they run. The `Stop` gate still judges them (010 FR-013).
+- Shell reads of `.env` are denied by pattern match only, best effort, now in
+  any letter case and after more delimiters (012 FR-009). It is not a
+  security boundary (010 FR-016).
 - Shell edits to `.claude/settings*.json` and `.claude/hooks/**` are not
-  covered (FR-026).
+  covered (010 FR-026).
 - `permissions.ask` has no human to ask under `bypassPermissions`, as in the
   E2B sandbox, so AF-REGISTRY and AF-HARNESS don't apply there.
+- A session whose own working directory was removed runs no hooks at all:
+  Claude Code cannot start the hook process, and treats that as a
+  non-blocking error, so every call is allowed. Only `onFailure` (Claude Code
+  2.1.295 and later) fixes this. Do not remove the worktree a session is in.
+- AF-SPEC judges paths inside the worktree whose scripts run. An edit in
+  another worktree or in the main checkout is not judged.
+- The turn snapshot is not tied to a worktree. A turn that moves into another
+  worktree (`cd`, `EnterWorktree`) is judged at `Stop` in the new one, against
+  a snapshot adopted there, and the first worktree's changes wait for its next
+  turn.
 
 Concurrent agent sessions are supported only as **one session per git
 worktree** (`claude --worktree` / `EnterWorktree`): the turn gate fingerprints
@@ -135,12 +190,15 @@ checkout, and a branch switch by another session shows up as this turn's change.
   warning at 120k (`CTX_BUDGET`/`CTX_WARN` in `.claude/hooks/lib.sh`). The cap
   is `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW` in `.claude/settings.json`, which is
   protected by AF-HARNESS. The warning comes from `turn-start`. It is best
-  effort, because it reads Claude Code's internal transcript. After `/compact`
+  effort, because it reads Claude Code's internal transcript. It uses only
+  usage recorded since the session's latest compaction; with none yet, it
+  shows nothing. After `/compact`
   or `/clear`, the `SessionStart(compact|clear)` hook
   (`.claude/hooks/session-context.sh`) tells the new context where to resume.
   On a feature branch with a spec dir, that is the branch, the spec dir, the
   next unchecked tasks, whether a turn snapshot is pending, and the rule IDs.
-  Anywhere else it adds nothing.
+  During a rebase it names the branch being rebased. Anywhere else it adds
+  nothing.
 - **`/clear`** between Spec Kit phases (specify → plan → tasks → implement) and
   after each feature commit. The feature's `specs/NNN-*/` directory on disk is
   the handoff.

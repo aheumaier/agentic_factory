@@ -15,7 +15,9 @@
 #                            ruff on the changed .py files and both suites; a
 #                            drift-tier-only change (docs the context-drift
 #                            test reads) runs only that test (012 FR-021), so
-#                            a turn can't end red. Edits made through any tool,
+#                            a docs-only turn stays fast. Renames outside
+#                            TURN_PATHS that break the drift test are caught
+#                            at AF-COMMIT, not here (012 R15). Edits made through any tool,
 #                            shell included, are in the diff. The loop guard
 #                            (stop_hook_active) is read before the uv and
 #                            timeout-tool checks; a missing uv is a red run;
@@ -32,12 +34,24 @@
 set -uo pipefail
 
 MODE="${1:-}"
-if ! . "$(dirname "$0")/lib.sh"; then
+# A lib.sh that loads without its helpers counts as not loaded: each call
+# would return 127 and the edit or the turn would pass with no check (US1).
+if ! . "$(dirname "$0")/lib.sh" \
+  || ! declare -F gate_start require_tools run_check run_suites state_dir session_key \
+    rel_path turn_fingerprint resolve_snapshot >/dev/null \
+  || ! declare -p TURN_PATHS >/dev/null 2>&1; then
   # turn-start must never block or erase the operator's prompt.
   [ "$MODE" = "turn-start" ] && exit 0
   echo "py-check.sh: cannot load lib.sh" >&2
   exit 2
 fi
+# Any other exit than 0 or 2 is a non-blocking hook error, which would let
+# the edit or the turn through unchecked, so it blocks instead (as policy.sh).
+case "$MODE" in
+  edit | stop)
+    trap 'rc=$?; [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ] || { echo "py-check.sh stopped on an unexpected error (exit $rc); see the error above." >&2; exit 2; }' EXIT
+    ;;
+esac
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd) || {
   [ "$MODE" = "turn-start" ] && exit 0

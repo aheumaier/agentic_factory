@@ -112,7 +112,7 @@ judge this call". It is never a policy verdict on what the call does.
 
 | ID | Mechanism | Triggers |
 |---|---|---|
-| AF-HOOKS | launcher (exit 2) · `policy.sh` (exit 2) | script missing in both places; `lib.sh` fails to load; repo root cannot be resolved; payload empty, not a JSON object, or without a string `tool_name` |
+| AF-HOOKS | launcher (exit 2) · `policy.sh` (exit 2) | script missing in both places; `lib.sh` fails to load or lacks the helpers `policy.sh` calls; `policy.sh` stops on an unexpected error (any exit other than 0 or 2); repo root cannot be resolved; payload empty, not a JSON object, or without a string `tool_name` |
 | AF-SECRET | `policy.sh` deny | Read/Grep/Glob path or filter matches (as shipped); Bash command matches the case-folded `SECRET_RE` |
 | AF-SPEC | `policy.sh` deny | normalised path under `harness/`, `orchestration/` or `eval/` (top segment case-folded), and no tasks.md for the feature branch |
 | AF-COMMIT | `policy.sh` deny | a gated git segment, and a gate outcome other than `green` |
@@ -128,7 +128,10 @@ AF-SPEC → AF-COMMIT. The first deny wins.
 - All other denies keep 010's JSON `permissionDecision: "deny"` with exit 0.
 
 **Validation**: unchanged. Every deny's first line matches
-`^\[AF-[A-Z]+\] .+\. To proceed: .+$`, including all AF-HOOKS messages.
+`^\[AF-[A-Z]+\] .+\. To proceed: .+$`, including all AF-HOOKS messages. One
+exception: `policy.sh`'s unexpected-error refusal (any exit other than 0 or 2) is
+printed by an `EXIT` trap, so its `[AF-HOOKS]` line is the last stderr line, below
+bash's own error (T057 review, 2026-10-13).
 
 ### AF-SECRET matching
 
@@ -263,3 +266,4 @@ target repo.
 | marked test | `request.node.get_closest_marker("temporal")` is set → the original `connect` runs |
 | unmarked test | `pytest.fail("<nodeid> connects to live Temporal but is not marked @pytest.mark.temporal")` before any network call |
 | guard's own test | `orchestration/tests/test_temporal_marker_guard.py` uses `pytester`. It is enabled by `pytest_plugins = ["pytester"]` in `orchestration/conftest.py` (the suite's top-level conftest, where `pytest_plugins` is allowed). Each case copies the guard into the temp dir with `pytester.makeconftest(...)`, because the outer conftest does not apply there |
+| limit | Only a connection made inside a test or a function-scoped fixture is guarded. A module-, class- or session-scoped fixture is set up before the function-scoped patch, so its `connect` is not checked. No such fixture exists on 2026-10-13 (T057 review) |

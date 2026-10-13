@@ -618,6 +618,40 @@ def test_failed_harness_commit_is_not_reported_as_no_change(origin, monkeypatch,
     assert "checkpoint commit failed" in capsys.readouterr().err
 
 
+def test_failed_final_harness_commit_fails_the_run(origin, monkeypatch, capsys):
+    # specs/012 FR-011: the tick's checkpoint lands, so HEAD moves, but the
+    # final "checkpoint: end of ..." commit fails. The edit after the tick
+    # is uncommitted, so the run must fail instead of pushing partial work.
+    origin.seed("# Tasks\n\n- [ ] T001 one\n")
+    pr_calls: list = []
+    _stub_pr(monkeypatch, pr_calls)
+    real_run = swe_agent._run
+
+    def failing_end_commit(cmd, cwd=None):
+        if cmd[0] == "git" and "commit" in cmd and any("end of" in c for c in cmd):
+            raise subprocess.CalledProcessError(1, cmd, output="", stderr="hook rejected")
+        return real_run(cmd, cwd=cwd)
+    monkeypatch.setattr(swe_agent, "_run", failing_end_commit)
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001")),
+        lambda cwd: _edit(cwd, "b.py"),
+    ))
+
+    before = _origin_head(origin.bare)
+
+    with pytest.raises(RuntimeError, match="final commit failed.*pushed to"):
+        _main()
+    assert pr_calls == []
+    err = capsys.readouterr().err
+    assert "hook rejected" in err
+    # The T057 review: the task checkpoint already made is pushed, so the
+    # next attempt resumes from it instead of losing it with the sandbox.
+    assert _origin_head(origin.bare) != before
+    # The task session's own end commit is retried by the final one, but the
+    # final commit is not retried, so its stderr line must not say so.
+    assert err.rstrip().endswith("checkpoint commit failed: hook rejected")
+
+
 # --- specs/011 F2: the reading's own reset time travels in the status line -----
 
 def test_ok_line_carries_the_readings_window_reset(origin, monkeypatch, capsys):
@@ -957,6 +991,24 @@ def test_notes_go_to_a_comment_when_the_pr_exists(origin, monkeypatch, capsys, c
     assert "ran pytest: 3 passed" in body
     if comment_error:
         assert "HTTP 502" in capsys.readouterr().err
+
+
+def test_notes_comment_warns_when_the_pr_lookup_finds_none(tmp_path, monkeypatch, capsys):
+    """FR-011: the comment step only warns, also when verify_pr_exists raises
+    RuntimeError (gh lists no PR). Called directly: an end-to-end run would
+    fail on run()'s own final verify_pr_exists with the same empty list."""
+    def fake_run(cmd, cwd=None):
+        if cmd[:3] == ["gh", "pr", "create"]:
+            raise subprocess.CalledProcessError(
+                1, cmd, output="", stderr="a pull request for branch already exists",
+            )
+        return "[]" if cmd[:3] == ["gh", "pr", "list"] else ""
+    monkeypatch.setattr(swe_agent, "_run", fake_run)
+
+    out = swe_agent.push_and_open_pr(tmp_path, "o/r", BRANCH, "t", notes="ran pytest")
+
+    assert "already exists" in out
+    assert "could not post the verification notes" in capsys.readouterr().err
 
 
 def test_notes_are_fenced(origin, monkeypatch):

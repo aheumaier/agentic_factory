@@ -82,7 +82,7 @@ trim_pytest() {
 # After gate_start, each step runs under the runner with the time left, and an
 # exit of 124 or 137 ends the gate with the outcome "timed out".
 run_check() {
-  local label="$1" out rc left
+  local label="$1" out rc left f
   shift
   [ -z "$gate_outcome" ] || return 0
   if [ -n "$gate_deadline" ]; then
@@ -90,8 +90,16 @@ run_check() {
     [ "$left" -ge 1 ] || left=1
     set -- "$gate_cmd" --kill-after=5 "${left}s" "$@"
   fi
-  out="$("$@" 2>&1)"
+  # A file, not $(...): a child the step leaves running with its output open
+  # would hold the pipe, and the gate, until it ends (012 FR-003).
+  f="$(mktemp 2>/dev/null)" || {
+    failures="${failures}"$'\n'"=== ${label} FAILED ==="$'\n'"mktemp failed, so ${label} did not run"$'\n'
+    return 0
+  }
+  "$@" >"$f" 2>&1
   rc=$?
+  out="$(< "$f")"
+  rm -f "$f"
   if [ -n "$gate_deadline" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; }; then
     gate_outcome="timed out"
     failures="${failures}"$'\n'"=== gate TIMED OUT after ${GATE_LIMIT}s ==="$'\n'"${label} timed out after ${GATE_LIMIT}s"$'\n'
