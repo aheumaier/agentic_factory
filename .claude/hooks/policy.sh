@@ -29,6 +29,7 @@
 # best-effort pattern matching, not a boundary (FR-016).
 # Contract: specs/010-dev-harness-hardening/contracts/hook-interface.md, amended
 # by specs/012-dev-harness-followups/contracts/hook-interface.md.
+# shellcheck source-path=SCRIPTDIR
 set -uo pipefail
 
 # 012 FR-015: bash's own error is dropped so the deny line comes first.

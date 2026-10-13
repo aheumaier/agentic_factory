@@ -1968,3 +1968,131 @@ def test_context_after_compaction_rearms_on_low_usage(harness_repo):
     assert not ctx_marker(repo).exists()
     again = ctx_start(repo, write_transcript(t, [125_000, _BOUNDARY, 10_000, 125_000]))
     assert again is not None
+
+
+# ---------------------------------------------------------------------------
+# 012 US4: what a turn's Stop runs, by tier (T047, FR-021, FR-023, R15)
+# ---------------------------------------------------------------------------
+
+_DRIFT_TEST = "tests/test_context_drift.py"
+
+
+def _commit_file(repo: Path, rel: str, text: str) -> Path:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", f"add {rel}")
+    return path
+
+
+def _suite_dirs(repo: Path) -> list[str]:
+    return sorted(c[c.index("--directory") + 1] for c in calls_for(repo, "pytest"))
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "CLAUDE.md",
+        ".claude/agents/py-codereviewer.md",
+        "registry/agents/a/manifest.yaml",
+        "specs/001-x/spec.md",
+    ],
+)
+def test_docs_turn_runs_only_the_drift_test(harness_repo, rel):
+    repo = harness_repo
+    path = _commit_file(repo, rel, "before\n")
+    turn_start(repo)
+    path.write_text("after\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert calls_for(repo, "ruff") == []
+    [drift] = calls_for(repo, "pytest")
+    assert _DRIFT_TEST in drift
+
+
+@pytest.mark.parametrize("rel", [".claude/hooks/lib.sh", ".claude/settings.json"])
+def test_hook_or_settings_turn_runs_the_full_gate(harness_repo, rel):
+    repo = harness_repo
+    if rel == ".claude/settings.json":
+        _commit_file(repo, rel, "{}\n")
+    path = repo / rel
+    turn_start(repo)
+    path.write_text(path.read_text() + "\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert calls_for(repo, "ruff") == []
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+
+
+def test_both_tiers_changed_runs_the_full_gate_once(harness_repo):
+    repo = harness_repo
+    claude_md = _commit_file(repo, "CLAUDE.md", "before\n")
+    turn_start(repo)
+    claude_md.write_text("after\n")
+    (repo / "pkg" / "clean.py").write_text("VALUE = 2\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    [ruff] = calls_for(repo, "ruff")
+    assert "pkg/clean.py" in ruff
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+    assert not any(_DRIFT_TEST in c for c in calls_for(repo, "pytest"))
+
+
+def test_old_snapshot_runs_the_full_gate_once(harness_repo):
+    repo = harness_repo
+    turn_start(repo)
+    # A snapshot as the 010 hook wrote it: only the *.py, *pyproject.toml and
+    # *uv.lock lines. The files of the new pathspecs then show up as added.
+    old = [
+        line for line in snapshot(repo).read_text().splitlines()
+        if line.endswith((".py", "pyproject.toml", "uv.lock"))
+    ]
+    snapshot(repo).write_text("".join(f"{line}\n" for line in old))
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+    assert not any(_DRIFT_TEST in c for c in calls_for(repo, "pytest"))
+
+    # The next turn takes a full snapshot, so nothing runs again.
+    turn_start(repo)
+    assert stop(repo).returncode == 0
+    assert len(calls_for(repo, "pytest")) == 2
+
+
+def test_non_ascii_py_on_head_fallback_runs_the_full_gate(harness_repo):
+    # FR-021, R15: with no snapshot, git's default core.quotePath would print
+    # "pkg/na\303\257ve.py" in quotes; the path must still be read as a .py file.
+    repo = harness_repo
+    # FR-021: commit the fixture's hook copies, so the non-ASCII file is the
+    # only changed path and the suites run because of it.
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "hooks")
+    (repo / "pkg" / "naïve.py").write_text("VALUE = 2\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    [ruff] = calls_for(repo, "ruff")
+    assert "pkg/naïve.py" in ruff
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+
+
+def test_hook_scripts_pass_shellcheck():
+    # FR-023, R17: -x follows `source ./lib.sh` through each script's
+    # source-path directive.
+    if shutil.which("shellcheck") is None:
+        pytest.skip("shellcheck not installed: hook scripts were not linted")
+    scripts = sorted(str(p.relative_to(REPO_ROOT)) for p in HOOKS_DIR.glob("*.sh"))
+    result = subprocess.run(
+        ["shellcheck", "-x", *scripts], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

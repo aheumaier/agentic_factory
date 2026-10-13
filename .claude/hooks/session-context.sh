@@ -13,6 +13,7 @@
 # deliberately no PreCompact hook: compaction is never held up.
 # Contract: specs/010-dev-harness-hardening/contracts/hook-interface.md, amended
 # by specs/012-dev-harness-followups/contracts/hook-interface.md.
+# shellcheck source-path=SCRIPTDIR
 
 command -v jq >/dev/null 2>&1 || exit 0
 command -v git >/dev/null 2>&1 || exit 0

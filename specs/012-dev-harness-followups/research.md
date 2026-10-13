@@ -756,3 +756,30 @@ Review of T036-T045 (Phase 5, User Story 3), 2026-10-13.
   `.claude/hooks/session-context.sh:35` ("no tasks.md" while tasks.md is on the
   tip) are the same bug. One fix covers both: the resume block reads the next
   tasks from the branch tip and says so on the spec dir line.
+
+Review of T046-T055 (Phase 6, User Story 4), 2026-10-13.
+
+- **shell-reviewer, `.claude/hooks/lib.sh:113`, and py-codereviewer,
+  `.claude/hooks/lib.sh:113` (same finding, merged): "FR-023 says a missing
+  shell linter must be reported visibly, but the gate never shows the
+  shellcheck skip".** Rejected for this round. R17 decided it: the skip shows in
+  the pytest summary line and with `-rs` (quickstart V8), and "the Stop hook does
+  not repeat it: that would need new gate plumbing for one line". A
+  `systemMessage` on a green Stop or on an AF-COMMIT allow is not in
+  `contracts/hook-interface.md`, so adding one is a contract change, not a
+  fix-round repair (the same ruling as the Phase 5 `py-check.sh:27` finding
+  above). Open for the operator: FR-023's wording ("MUST say so visibly") and
+  R17 disagree once the gate hides a green run's output. Either amend FR-023 to
+  "visible in a pytest run with `-rs`", or schedule the one-line notice in both
+  gates.
+- **Not rejected, fixed:** shell-reviewer `.claude/hooks/py-check.sh:211` (the
+  tier `case` failed open, and the HEAD fallback read quoted non-ASCII names).
+  The `case` now lists only the drift tier, so any other path runs the full
+  gate, and the fallback reads paths with `-z`. Test:
+  `test_non_ascii_py_on_head_fallback_runs_the_full_gate`. The reviewer's second
+  suggested test (a `TURN_PATHS` path outside both tier lists) cannot be built:
+  `TURN_PATHS` is exactly the union of the two tiers.
+- **Not rejected, fixed:** shell-reviewer `.claude/hooks/lib.sh:176`
+  (`python_fingerprint` hides that it also covers docs and hook files). Renamed
+  to `turn_fingerprint` in this round, not in T056, because lib.sh and
+  py-check.sh were already being changed for the finding above.

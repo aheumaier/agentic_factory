@@ -8,7 +8,9 @@
 
 # Context budget (US4). Single source of truth: the settings test asserts
 # env.CLAUDE_CODE_AUTO_COMPACT_WINDOW in .claude/settings.json equals CTX_BUDGET.
+# shellcheck disable=SC2034
 CTX_BUDGET=150000
+# shellcheck disable=SC2034
 CTX_WARN=120000
 
 failures=""
@@ -162,15 +164,22 @@ rel_path() {
   esac
 }
 
-# python_fingerprint <root> — "<blob-sha>\t<path>" for every tracked or
-# untracked, non-ignored *.py / *pyproject.toml / *uv.lock on disk, C-sorted.
-python_fingerprint() {
+# The files a turn is judged on (012 R15; data-model "Turn snapshot"). Full
+# tier: Python code and config, the hook scripts and settings. Drift tier: the
+# files the context-drift test reads. py-check.sh stop picks the tier by path.
+TURN_PATHS=('*.py' '*pyproject.toml' '*uv.lock' '.claude/hooks/*.sh' '.claude/settings.json'
+  'CLAUDE.md' '.claude/agents/py-codereviewer.md' 'registry/agents/*/manifest.yaml'
+  'specs/*/spec.md')
+
+# turn_fingerprint <root> — "<blob-sha>\t<path>" for every tracked or
+# untracked, non-ignored TURN_PATHS file on disk, C-sorted.
+turn_fingerprint() {
   local root="$1" p shas
   local -a paths=()
   while IFS= read -r -d '' p; do
     [ -f "$root/$p" ] && paths+=("$p")
   done < <(git -C "$root" ls-files -co --exclude-standard -z -- \
-    '*.py' '*pyproject.toml' '*uv.lock' 2>/dev/null)
+    "${TURN_PATHS[@]}" 2>/dev/null)
   [ "${#paths[@]}" -gt 0 ] || return 0
   shas="$(printf '%s\n' "${paths[@]}" | git -C "$root" hash-object --stdin-paths)" || return 1
   printf '%s\n' "${paths[@]}" | paste <(printf '%s\n' "$shas") - | LC_ALL=C sort -u

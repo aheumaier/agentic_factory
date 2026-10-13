@@ -1,5 +1,7 @@
 # Contract: Context-Drift Conventions (010)
 
+> Amended by `specs/012-dev-harness-followups/contracts/drift-conventions.md` (extractor rules as shipped, D-ID corpus, Stop coverage).
+
 How facts in the always-loaded context files must be written so that
 `tests/test_context_drift.py` can check them, and what the test does with each.
 The authors of `CLAUDE.md` and `.claude/agents/py-codereviewer.md` are bound by

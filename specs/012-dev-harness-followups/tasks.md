@@ -300,26 +300,26 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Tests for User Story 4 (write first, must fail) ⚠️
 
-- [ ] T046 [P] [US4] Corpus test in `tests/test_context_drift.py` (FR-020, R14). `test_ignored_file_is_not_in_the_corpus`:
+- [X] T046 [P] [US4] Corpus test in `tests/test_context_drift.py` (FR-020, R14). `test_ignored_file_is_not_in_the_corpus`:
   1. In a `_tree(tmp_path)` that is also a git repo (`git init -q`, plus a `.gitignore` with `secret_mod.py`), write `secret_mod.py` defining `def only_here(): ...`.
   2. `check_reg`/`_in_code` on text naming `only_here` reports it missing.
   3. A tracked or untracked-but-not-ignored file with the same name is found.
 
   The old `os.walk` corpus finds it, so the test fails. (T051 makes `_tree` run `git init`.)
-- [ ] T047 [US4] Drift-tier Stop tests in `tests/test_harness_hooks.py` (FR-021, FR-023, R15):
+- [X] T047 [US4] Drift-tier Stop tests in `tests/test_harness_hooks.py` (FR-021, FR-023, R15):
   - `test_docs_turn_runs_only_the_drift_test`: parametrize over `CLAUDE.md`, `.claude/agents/py-codereviewer.md`, `registry/agents/a/manifest.yaml` and `specs/001-x/spec.md`. Commit the file first, then `turn_start`, edit it, and `stop`. Exactly one pytest call, whose argv contains `tests/test_context_drift.py`; no ruff call.
   - `test_hook_or_settings_turn_runs_the_full_gate`: editing `.claude/hooks/lib.sh` (the fixture copy) or a committed `.claude/settings.json` runs both suites.
   - `test_both_tiers_changed_runs_the_full_gate_once`: a `.py` and `CLAUDE.md` both changed give both suites and no separate drift call.
   - `test_old_snapshot_runs_the_full_gate_once` (upgrade): a snapshot holding only `*.py` lines makes the first Stop run both suites. This works because the old snapshot lacks the new pathspecs, so `.claude/hooks/*.sh` and `.claude/settings.json` show up as added full-tier paths. Do not add a version marker to the snapshot.
-- [ ] T048 [US4] Shellcheck test in `tests/test_harness_hooks.py` (FR-023, R17). It must fail first, on SC2034 (CTX_BUDGET/CTX_WARN) and the unfollowed `source`. `test_hook_scripts_pass_shellcheck`:
+- [X] T048 [US4] Shellcheck test in `tests/test_harness_hooks.py` (FR-023, R17). It must fail first, on SC2034 (CTX_BUDGET/CTX_WARN) and the unfollowed `source`. `test_hook_scripts_pass_shellcheck`:
   - Skip with `pytest.skip("shellcheck not installed: hook scripts were not linted")` when `shutil.which("shellcheck")` is None.
   - Otherwise run `shellcheck -x .claude/hooks/*.sh` from `REPO_ROOT` and assert exit 0, showing stdout on failure.
-- [ ] T049 [P] [US4] Temporal guard test in `orchestration/tests/test_temporal_marker_guard.py` (FR-022, R16). Use `pytester.makeconftest(<the guard's source, read from orchestration/conftest.py>)` and `pytester.makepyfile(...)` with:
+- [X] T049 [P] [US4] Temporal guard test in `orchestration/tests/test_temporal_marker_guard.py` (FR-022, R16). Use `pytester.makeconftest(<the guard's source, read from orchestration/conftest.py>)` and `pytester.makepyfile(...)` with:
   - an unmarked test that calls `temporalio.client.Client.connect("localhost:1")`, which must fail with "connects to live Temporal but is not marked @pytest.mark.temporal" and its nodeid;
   - a `@pytest.mark.temporal` test whose connect error is caught and turned into a skip, which must be skipped, not failed.
 
   Run with `cd orchestration && uv run --locked pytest tests/test_temporal_marker_guard.py -q`. It fails, because there is no conftest yet.
-- [ ] T050 [US4] Marker coverage (FR-022). Check every function that reaches `_connect_or_skip` and confirm it is under `@pytest.mark.temporal` or a module `pytestmark`:
+- [X] T050 [US4] Marker coverage (FR-022). Check every function that reaches `_connect_or_skip` and confirm it is under `@pytest.mark.temporal` or a module `pytestmark`:
   - `orchestration/tests/test_credential_pool.py:200` (the helper at :209 and every caller; only :224, :241 and :251 are marked today);
   - `orchestration/tests/test_pipeline_workflow.py:36`;
   - `orchestration/webhook_bridge/tests/test_integration.py:18`;
@@ -329,30 +329,30 @@ The fixture copies the scripts into `<tmp>/repo/.claude/hooks/`, so `ROOT` taken
 
 ### Implementation for User Story 4
 
-- [ ] T051 [US4] `_corpus` in `tests/test_context_drift.py:67` (FR-020, R14):
+- [X] T051 [US4] `_corpus` in `tests/test_context_drift.py:67` (FR-020, R14):
   - Replace `os.walk` with `git -C <root> ls-files -co --exclude-standard -z`.
   - Keep the excluded prefixes (`specs/`, `.claude/`, `.specify/`, `.git/`, any `.venv/`, `node_modules/`) and read regular files only.
   - Keep `functools.cache` and the return shape.
   - Make `_tree` (:259) run `git init -q` in the tmp tree, because `git ls-files` sees nothing outside a repo. This is test infrastructure for the new corpus and changes no expected result, so the existing synthetic drift tests stay unchanged.
 
   T046 now passes, and `uv run --locked pytest tests/test_context_drift.py -q` is green on the real repo.
-- [ ] T052 [US4] Turn tiers in `.claude/hooks/lib.sh` `python_fingerprint` (:105) and `.claude/hooks/py-check.sh` stop (FR-021, FR-023, R15; data-model "Turn snapshot"):
+- [X] T052 [US4] Turn tiers in `.claude/hooks/lib.sh` `python_fingerprint` (:105) and `.claude/hooks/py-check.sh` stop (FR-021, FR-023, R15; data-model "Turn snapshot"):
   - Add the pathspecs `.claude/hooks/*.sh`, `.claude/settings.json`, `CLAUDE.md`, `.claude/agents/py-codereviewer.md`, `registry/agents/*/manifest.yaml` and `specs/*/spec.md` to the fingerprint. The file format is unchanged.
   - At Stop, work out each changed path's tier from the path. A full-tier change runs ruff on the changed `.py` files that still exist, then both suites. A drift-only change runs only `uv run --locked pytest tests/test_context_drift.py -q`, through the T018 runner.
 
   Run `bash -n`. (AF-HARNESS prompt.) T047 now passes.
-- [ ] T053 [US4] Guard in the new `orchestration/conftest.py` (FR-022, R16):
+- [X] T053 [US4] Guard in the new `orchestration/conftest.py` (FR-022, R16):
   - Set `pytest_plugins = ["pytester"]`.
   - Add an autouse, function-scoped fixture that monkeypatches `temporalio.client.Client.connect`. For a test without the `temporal` marker it calls `pytest.fail(f"{request.node.nodeid} connects to live Temporal but is not marked @pytest.mark.temporal")`; for a marked test it calls the original.
 
   No dependency change. Run `cd orchestration && uv run --locked pytest -q` twice: once with Temporal down (`make down`), where marked tests skip and none fails; and once with it up (`make up`), where all pass. T049 now passes.
-- [ ] T054 [US4] Shellcheck directives (R17), which make T048 pass:
+- [X] T054 [US4] Shellcheck directives (R17), which make T048 pass:
   - `# shellcheck disable=SC2034` on the line above `CTX_BUDGET=` and above `CTX_WARN=` in `.claude/hooks/lib.sh:11-12`.
   - `# shellcheck source-path=SCRIPTDIR` just below the header comment of `.claude/hooks/policy.sh`, `.claude/hooks/py-check.sh` and `.claude/hooks/session-context.sh`.
   - Fix any other finding that `shellcheck -x .claude/hooks/*.sh` reports in lines 012 changed.
 
   Run `bash -n` on each script. (AF-HARNESS prompt.)
-- [ ] T055 [US4] Drift contract (FR-018, FR-019, SC-005). Make sure `specs/012-dev-harness-followups/contracts/drift-conventions.md` states the extractor's rules as shipped: the non-private lowercase names such as `shape_issue`, the git-ls-files corpus and Stop coverage, including the YAML gap from R15. Add the pointer line `> Amended by \`specs/012-dev-harness-followups/contracts/drift-conventions.md\` (extractor rules as shipped, D-ID corpus, Stop coverage).` at the top of `specs/010-dev-harness-hardening/contracts/drift-conventions.md`. Run quickstart V7 by hand.
+- [X] T055 [US4] Drift contract (FR-018, FR-019, SC-005). Make sure `specs/012-dev-harness-followups/contracts/drift-conventions.md` states the extractor's rules as shipped: the non-private lowercase names such as `shape_issue`, the git-ls-files corpus and Stop coverage, including the YAML gap from R15. Add the pointer line `> Amended by \`specs/012-dev-harness-followups/contracts/drift-conventions.md\` (extractor rules as shipped, D-ID corpus, Stop coverage).` at the top of `specs/010-dev-harness-hardening/contracts/drift-conventions.md`. Run quickstart V7 by hand.
 
 **Checkpoint**: All four stories pass.
 

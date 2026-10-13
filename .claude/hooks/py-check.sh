@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Turn-scoped ruff + pytest gate for this repo (feature 010, User Story 1).
 # Wired in .claude/settings.json:
-#   py-check.sh turn-start — UserPromptSubmit: fingerprint every Python-relevant
-#                            file (*.py, *pyproject.toml, *uv.lock) once per
+#   py-check.sh turn-start — UserPromptSubmit: fingerprint every TURN_PATHS
+#                            file (lib.sh) once per
 #                            turn, adopting a snapshot left pending by an
 #                            interrupted turn (e.g. before /clear). Then
 #                            warns once per level as context nears the
@@ -11,8 +11,10 @@
 #   py-check.sh edit       — PostToolUse (Edit|Write|MultiEdit): ruff on the
 #                            edited .py file only. Never runs pytest.
 #   py-check.sh stop       — Stop: diff the tree against the turn snapshot (or
-#                            HEAD if none is usable), then ruff the changed .py
-#                            files and run both suites if anything changed, so
+#                            HEAD if none is usable). A full-tier change runs
+#                            ruff on the changed .py files and both suites; a
+#                            drift-tier-only change (docs the context-drift
+#                            test reads) runs only that test (012 FR-021), so
 #                            a turn can't end red. Edits made through any tool,
 #                            shell included, are in the diff. The loop guard
 #                            (stop_hook_active) is read before the uv and
@@ -26,6 +28,7 @@
 # by path, so a harness edit can break the orchestration suite (and vice versa
 # for tests/). Contract: specs/010-dev-harness-hardening/contracts/hook-interface.md,
 # amended by specs/012-dev-harness-followups/contracts/hook-interface.md.
+# shellcheck source-path=SCRIPTDIR
 set -uo pipefail
 
 MODE="${1:-}"
@@ -45,11 +48,10 @@ INPUT=""
 # Bounded read: a hand run with an open, never-closing pipe must not hang.
 [ -t 0 ] || IFS= read -r -d '' -t 5 INPUT || true
 
-WATCHED=('*.py' '*pyproject.toml' '*uv.lock')
 TAB=$'\t'
 
 # snapshot_usable <file> <current-fingerprint> — readable, every line
-# "<40-hex sha>\t<path>", and non-empty when Python-relevant files exist.
+# "<40-hex sha>\t<path>", and non-empty when TURN_PATHS files exist.
 snapshot_usable() {
   [ -n "$1" ] && [ -r "$1" ] || return 1
   if [ -s "$1" ]; then
@@ -124,7 +126,7 @@ case "$MODE" in
     # FR-001: never retake on a mid-turn message; a pending snapshot stays.
     if [ ! -e "$snap" ]; then
       tmp="$(mktemp "$sd/.turn-$key.XXXXXX" 2>/dev/null)" || exit 0
-      if python_fingerprint "$ROOT" >"$tmp" 2>/dev/null; then
+      if turn_fingerprint "$ROOT" >"$tmp" 2>/dev/null; then
         mv -f "$tmp" "$snap" 2>/dev/null
       fi
       rm -f "$tmp" 2>/dev/null
@@ -163,7 +165,7 @@ case "$MODE" in
       resolve_snapshot "$sd" "$key"
       snap="$sd/turn-$key.tsv"
     fi
-    current="$(python_fingerprint "$ROOT")"
+    current="$(turn_fingerprint "$ROOT")"
 
     changed=()
     if snapshot_usable "$snap" "$current"; then
@@ -175,13 +177,14 @@ case "$MODE" in
       )
     else
       # FR-010: no usable snapshot -> judge everything changed vs HEAD.
-      while IFS= read -r p; do
+      # -z: a quoted non-ASCII name would match no tier pattern.
+      while IFS= read -r -d '' p; do
         [ -n "$p" ] && changed+=("$p")
       done < <(
         {
-          git -C "$ROOT" diff --name-only HEAD -- "${WATCHED[@]}" 2>/dev/null
-          git -C "$ROOT" ls-files --others --exclude-standard -- "${WATCHED[@]}" 2>/dev/null
-        } | LC_ALL=C sort -u
+          git -C "$ROOT" diff --name-only -z HEAD -- "${TURN_PATHS[@]}" 2>/dev/null
+          git -C "$ROOT" ls-files --others --exclude-standard -z -- "${TURN_PATHS[@]}" 2>/dev/null
+        } | LC_ALL=C sort -z -u
       )
     fi
 
@@ -201,18 +204,28 @@ case "$MODE" in
       failures="${failures}"$'\n'"=== uv FAILED ==="$'\n'"uv is required"$'\n'
     fi
 
+    # 012 R15: only drift-tier paths are listed; any other path runs the full
+    # gate, so a path missing from this list can't skip the suites.
+    full=0
     lint=()
     for p in "${changed[@]}"; do
       case "$p" in
-        *.py) [ -f "$ROOT/$p" ] && lint+=("$p") ;;
+        CLAUDE.md|.claude/agents/py-codereviewer.md|registry/agents/*/manifest.yaml|specs/*/spec.md) ;;
+        *.py) full=1; [ -f "$ROOT/$p" ] && lint+=("$p") ;;
+        *) full=1 ;;
       esac
     done
-    if [ "${#lint[@]}" -gt 0 ]; then
-      run_check "ruff check (${#lint[@]} changed files)" \
-        uv run --locked --directory "$ROOT" ruff check --force-exclude --output-format concise \
-        -- "${lint[@]}"
+    if [ "$full" -eq 0 ]; then
+      run_check "pytest tests/test_context_drift.py" \
+        uv run --locked --directory "$ROOT" pytest tests/test_context_drift.py -q --tb=short -rfE
+    else
+      if [ "${#lint[@]}" -gt 0 ]; then
+        run_check "ruff check (${#lint[@]} changed files)" \
+          uv run --locked --directory "$ROOT" ruff check --force-exclude --output-format concise \
+          -- "${lint[@]}"
+      fi
+      run_suites "$ROOT"
     fi
-    run_suites "$ROOT"
 
     if [ -z "$failures" ]; then
       rm -f "$snap"

@@ -14,8 +14,8 @@ Run as a script (`uv run --locked python tests/test_context_drift.py`) to
 print violations; `--candidates` also prints every classified D-ID token.
 """
 import functools
-import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -66,23 +66,28 @@ def _registry_dirs(repo_root: Path) -> list[str]:
 @functools.cache
 def _corpus(repo_root: Path) -> tuple[str, frozenset[str]]:
     """All `*.py` text in the D-ID search space, joined, plus the basename of
-    every file in it. Cached per repo root, so tmp trees get their own."""
+    every file in it. The space is what git sees, tracked plus untracked
+    files that are not ignored (FR-020), so a local scratch file never counts.
+    Cached per repo root, so tmp trees get their own."""
+    listed = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-co", "--exclude-standard", "-z"],
+        check=True, capture_output=True, text=True,
+    ).stdout
     py_texts: list[str] = []
     basenames: set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(repo_root):
-        here = Path(dirpath)
-        top = here == repo_root
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _EXCLUDED_ANY and not (top and d in _EXCLUDED_TOP)
-        ]
-        for name in filenames:
-            basenames.add(name)
-            if name.endswith(".py"):
-                try:
-                    py_texts.append((here / name).read_text(encoding="utf-8"))
-                except (OSError, UnicodeDecodeError):
-                    continue
+    for rel in listed.split("\0"):
+        parts = rel.split("/")
+        if not rel or parts[0] in _EXCLUDED_TOP or _EXCLUDED_ANY.intersection(parts[:-1]):
+            continue
+        path = repo_root / rel
+        if not path.is_file():  # a deleted tracked file, or a nested repo's dir
+            continue
+        basenames.add(path.name)
+        if path.suffix == ".py":
+            try:
+                py_texts.append(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
     return "\n".join(py_texts), frozenset(basenames)
 
 
@@ -258,6 +263,8 @@ def test_context_files_match_tree():
 
 
 def _tree(root: Path, agents=("architect-agent", "pm-agent", "swe-agent"), specs=()) -> Path:
+    # A git repo, because the D-ID corpus is what `git ls-files` sees (FR-020).
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
     for name in agents:
         (root / "registry" / "agents" / name).mkdir(parents=True)
     for name in specs:
@@ -322,6 +329,20 @@ def test_dotted_names_and_placeholders_are_not_flagged(tmp_path):
     text = "use `workflow.now()`; specs live in `specs/NNN-slug/`\n"
     assert check_id(root, text, "rev.md") == []
     assert check_spec(root, text, "rev.md") == []
+
+
+def test_ignored_file_is_not_in_the_corpus(tmp_path_factory):
+    # FR-020: the D-ID corpus is tracked plus untracked-but-not-ignored files.
+    # Two roots, because _corpus is cached per root. They differ only in the
+    # ignore rule (FR-020): the same top-level file, untracked in both.
+    ignored = _tree(tmp_path_factory.mktemp("ignored"))
+    (ignored / ".gitignore").write_text("secret_mod.py\n")
+    (ignored / "secret_mod.py").write_text("def only_here(): ...\n")
+    assert not _in_code(ignored, "only_here")
+
+    visible = _tree(tmp_path_factory.mktemp("visible"))
+    (visible / "secret_mod.py").write_text("def only_here(): ...\n")
+    assert _in_code(visible, "only_here")
 
 
 if __name__ == "__main__":
