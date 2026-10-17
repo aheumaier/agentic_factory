@@ -15,8 +15,8 @@
 
 - [x] No [NEEDS CLARIFICATION] markers remain. The input was approved by the operator, and the defaults are listed
   in the spec's Assumptions (see note 2).
-- [x] Requirements are testable and unambiguous
-- [x] Success criteria are measurable
+- [ ] Requirements are testable and unambiguous. See note 4.
+- [ ] Success criteria are measurable. See note 4.
 - [x] Success criteria are technology-agnostic (no implementation details). See note 1.
 - [x] All acceptance scenarios are defined
 - [x] Edge cases are identified
@@ -43,3 +43,8 @@
    writing, stated in the Assumptions and to the operator: the time limits and size limits, 14-day retention, the
    per-run credential, "index missing" never failing a run, and the 20% keep threshold in SC-008.
 3. Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`.
+4. A design review on 2026-10-17 (`review-2026-10-17.md` in this directory) found the spec not ready for
+   `/speckit-plan`: no commit identity runs through the run, "stale" is undefined, FR-019 clashes with the existing
+   "Read/Grep/Glob only" prompt lines, the FR-017 seed source is unset, and the measurement has no data source. The
+   items above are unticked until those findings are applied or rejected with a reason. Note 2's "SC-008" may be
+   renumbered by that change.

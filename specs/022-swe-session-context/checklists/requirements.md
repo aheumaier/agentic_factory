@@ -15,13 +15,13 @@
 
 - [x] No [NEEDS CLARIFICATION] markers remain. The input was approved by the operator, and the defaults are listed
   in the spec's Assumptions (see note 2).
-- [x] Requirements are testable and unambiguous
-- [x] Success criteria are measurable
+- [ ] Requirements are testable and unambiguous. See note 4.
+- [ ] Success criteria are measurable. See note 4.
 - [x] Success criteria are technology-agnostic (no implementation details). See note 1.
 - [x] All acceptance scenarios are defined
 - [x] Edge cases are identified
 - [x] Scope is clearly bounded
-- [x] Dependencies and assumptions identified
+- [ ] Dependencies and assumptions identified. See note 4.
 
 ## Feature Readiness
 
@@ -45,3 +45,8 @@
    the explorer's model defaults to the writer's, the cost ceiling is capped by the run's remaining cost cap, and the
    20% keep threshold in SC-007.
 3. Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`.
+4. A design review on 2026-10-17 (`review-2026-10-17.md` in this directory) found two wrong facts. A limit stop
+   does not end silently: the SDK raises an error, and the run exits 1 or is misread as a seat outcome. The writer has
+   the CLI's full default tool set, not six tools, because `build_options` sets `allowed_tools` and not `tools`. Note 2
+   repeats the first fact. The review also found that FR-014's final failure and FR-015's changes to spec 018 are
+   undefined. The items above are unticked until those findings are applied or rejected with a reason.
