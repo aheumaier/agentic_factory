@@ -15,8 +15,8 @@
 
 - [x] No [NEEDS CLARIFICATION] markers remain. The input was approved by the operator, and the defaults are listed
   in the spec's Assumptions (see note 2).
-- [ ] Requirements are testable and unambiguous. See note 4.
-- [ ] Success criteria are measurable. See note 4.
+- [x] Requirements are testable and unambiguous. See note 4.
+- [x] Success criteria are measurable. See note 4.
 - [x] Success criteria are technology-agnostic (no implementation details). See note 1.
 - [x] All acceptance scenarios are defined
 - [x] Edge cases are identified
@@ -38,13 +38,17 @@
    changes and the operator's own choice, the convention in this repo's specs, not a design choice made here. How the
    index is stored, how the sandbox reaches it, how the credential is minted, and how the tools are served are left
    to `/speckit-plan`. The assumptions let the plan swap a named tool for an equal one if it says why.
-2. The input was approved word for word by the operator on 2026-10-17. Two facts that differ from it are written under
-   the input (five lock files at three versions; `review_spec()` has no Temporal caller yet). Defaults chosen while
-   writing, stated in the Assumptions and to the operator: the time limits and size limits, 14-day retention, the
-   per-run credential, "index missing" never failing a run, and the 20% keep threshold in SC-008.
+2. The input was approved word for word by the operator on 2026-10-17. Three facts that differ from it are written
+   under the input (five lock files at three versions; `review_spec()` has no Temporal caller yet; `MCP_TIMEOUT` is
+   the server start-up limit and `MCP_TOOL_TIMEOUT` the per-call one). Defaults chosen while writing, stated in the
+   Assumptions and to the operator: the time limits and size limits, 14-day retention and the size cap, the
+   per-sandbox-invocation credential, index data kept on the operator's host, "index missing" never failing a run,
+   and the 20% keep threshold in FR-023.
 3. Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`.
 4. A design review on 2026-10-17 (`review-2026-10-17.md` in this directory) found the spec not ready for
-   `/speckit-plan`: no commit identity runs through the run, "stale" is undefined, FR-019 clashes with the existing
-   "Read/Grep/Glob only" prompt lines, the FR-017 seed source is unset, and the measurement has no data source. The
-   items above are unticked until those findings are applied or rejected with a reason. Note 2's "SC-008" may be
-   renumbered by that change.
+   `/speckit-plan`. All its findings were applied on 2026-10-17 (its "Disposition" section maps each to an FR, SC or
+   assumption); none was rejected. The commit contract is FR-025, "stale" is defined in Key Entities, FR-019 allows
+   correcting the three tool-list lines, FR-017 takes seeds from the harness, and FR-026 adds the measurement log.
+   The outcome-dependent SC-008 was removed, so the old SC-009 is now SC-008. Two items stay open for the operator:
+   the security review of US4's endpoint before it is built, and the choice in Assumptions "Which commit" between
+   building the architect's pushed commit and reusing the base commit's index.
