@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import braintrust
-from claude_agent_sdk import ClaudeAgentOptions, query
+from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
 
 # Sibling module, not a package: agent.py runs as a script (/app in the E2B
 # sandbox), so its own directory is on sys.path. specs/009.
@@ -46,10 +46,10 @@ time a task is marked done, a checkpoint commit is saved for you, so \
 finished work survives an interruption.
 
 After implementing, run this repo's existing tests/verification locally \
-to confirm the change works. Then commit your changes locally with \
-`git add -A && git commit` — including if local verification doesn't \
-fully pass, in which case say why in the commit message; a human \
-reviews the result either way. When you are done, STOP: do not run \
+to confirm the change works. Do not commit: the harness commits your \
+work. In your final message, list the checks you ran and, for any that \
+still fail, why. That message goes into the pull request for the human \
+reviewer. When you are done, STOP: do not run \
 `git push` and do not open a pull request. A separate step outside \
 this conversation handles pushing and opening the PR."""
 
@@ -68,14 +68,15 @@ When {task} is implemented, run this repo's existing tests/verification \
 for it, then mark {task} `[X]` in {tasks_md} and STOP. Do not commit: a \
 checkpoint commit is saved for you when the task is marked done. Do not \
 run `git push` and do not open a pull request. A separate step outside \
-this conversation handles pushing and opening the PR."""
+this conversation handles pushing and opening the PR. In your final \
+message, list the checks you ran and, for any that still fail, why."""
 
 FEEDBACK_PROMPT_SUFFIX = """
 
 The previous attempt on this branch failed the Eval-Gate. Feedback:
 {feedback}
 
-Address this feedback before re-running verification and committing."""
+Address this feedback before re-running verification."""
 
 # repo/branch are workflow inputs (ultimately caller-supplied) threaded
 # straight into git/gh argv. Reject anything not shaped like a plain
@@ -277,16 +278,18 @@ class TaskCheckpointer:
         if self._commit("checkpoint: " + (" ".join(ids) or "tasks")):
             self.saved.update(new)
 
-    def finish(self, what: str = "run") -> None:
+    def finish(self, what: str = "run") -> bool:
         """After a normal stream end (of the run, or of one task's session):
         checkpoint new ticks, then commit any edits made after the last one
-        (verification fixes) as `checkpoint: end of <what>`."""
+        (verification fixes) as `checkpoint: end of <what>`. True once
+        nothing is left uncommitted."""
         self()
-        self._commit(f"checkpoint: end of {what}")
+        return self._commit(f"checkpoint: end of {what}", retry=what != "run")
 
-    def _commit(self, message: str) -> bool:
+    def _commit(self, message: str, retry: bool = True) -> bool:
         """Commit everything if the tree is dirty. True once nothing is left
-        uncommitted; a failure goes to stderr (stdout is the seat protocol)."""
+        uncommitted; a failure goes to stderr (stdout is the seat protocol).
+        `retry` is False for the run's final commit, which nothing retries."""
         try:
             if not _run(["git", "status", "--porcelain"], cwd=self.checkout):
                 return True
@@ -295,7 +298,8 @@ class TaskCheckpointer:
                  cwd=self.checkout)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"checkpoint commit failed, will retry: {e.stderr}", file=sys.stderr)
+            then = ", will retry" if retry else ""
+            print(f"checkpoint commit failed{then}: {e.stderr}", file=sys.stderr)
             return False
 
 
@@ -344,7 +348,8 @@ async def run_implement(
     prompt: str = IMPLEMENT_PROMPT,
 ) -> str:
     """Run one model session on `prompt` (/speckit-implement by default,
-    TASK_PROMPT per task — specs/011 F7-a). In seat mode the stream goes through
+    TASK_PROMPT per task — specs/011 F7-a) and return the text of its last
+    ResultMessage: the model's verification notes (specs/012 FR-011). In seat mode the stream goes through
     seat_guard, which records last-seen usage into `usage` and raises
     SeatExhausted/SeatInvalid on a seat outcome (specs/009). `force_check`
     is seat_guard's test hook (SEAT_GUARD_FORCE_EXHAUST_AFTER_COMMITS).
@@ -362,41 +367,47 @@ async def run_implement(
         if seat_token
         else query(prompt=prompt, options=options)
     )
-    transcript: list[str] = []
+    result = ""
     # aclosing: an exception mid-stream tears the CLI subprocess down now,
     # not whenever the generator happens to be garbage-collected.
     async with contextlib.aclosing(stream) as messages:
         async for message in messages:
-            transcript.append(str(message))
+            if isinstance(message, ResultMessage):
+                result = message.result or ""
             if on_message is not None:
                 # Off the event loop: git (and a target repo's commit hooks)
                 # must not stall the SDK's stream readers. Still awaited, so
                 # it finishes before seat_guard resumes and polls force_check.
                 await asyncio.to_thread(on_message)
-    return "\n".join(transcript)
+    return result
 
 
 async def run_per_task(
     checkout: Path, tasks_md: Path, task_ids: list[str], usage: dict | None,
     force_check: Callable[[], bool] | None, checkpointer: TaskCheckpointer,
-) -> None:
+) -> str:
     """One model session per open task, in file order (specs/011 F7-a). A
     task ticked ahead in an earlier session is skipped. After each session
     its leftover edits are committed, so the next session's seat outcome
     can't lose them. A session that leaves its task open ends the loop: a
-    later task likely builds on it (research R10). Seat outcomes propagate."""
+    later task likely builds on it (research R10). Seat outcomes propagate.
+    Returns each session's notes under `### <task ID>`, in task order."""
     rel = tasks_md.relative_to(checkout)
+    notes: list[str] = []
     for task in task_ids:
         if not _task_open(tasks_md, task):
             continue
-        await run_implement(
+        result = await run_implement(
             checkout, None, usage, force_check, checkpointer,
             prompt=TASK_PROMPT.format(task=task, tasks_md=rel),
         )
+        if result.strip():
+            notes.append(f"### {task}\n\n{result.strip()}")
         checkpointer.finish(task)
         if _task_open(tasks_md, task):
             print(f"task {task} left open, stopping the per-task loop", file=sys.stderr)
-            return
+            break
+    return "\n\n".join(notes)
 
 
 def verify_left_main(checkout: Path, branch: str) -> None:
@@ -439,10 +450,17 @@ def checkpoint_push(checkout: Path, branch: str, sha_before: str) -> None:
 
 def verify_new_commit(checkout: Path, sha_before: str) -> None:
     if _head_sha(checkout) == sha_before:
+        if _run(["git", "status", "--porcelain"], cwd=checkout):
+            raise RuntimeError(
+                "Agent made no new commit — nothing to push: the harness's "
+                "commit failed (see the checkpoint stderr above), so the work "
+                "is uncommitted and is lost with the checkout. Fix that cause, "
+                "then rerun."
+            )
         raise RuntimeError(
-            "Agent made no new commit — nothing to push. It may have "
-            "produced only uncommitted changes (or none at all); rerun "
-            "with the prompt's commit instruction, or inspect manually."
+            "Agent made no new commit — nothing to push: the harness "
+            "commits any change, so none was made. Inspect the run "
+            "manually."
         )
 
 
@@ -453,11 +471,41 @@ def _pr_body_from_spec(checkout: Path) -> str:
     return Path(spec_files[0]).read_text()
 
 
-def push_and_open_pr(checkout: Path, repo: str, branch: str, title: str) -> str:
+NOTES_CAP = 4000
+NOTES_HEADER = "## Agent verification notes"
+# Credentials the model's shell can see; their values never reach the PR.
+NOTES_SECRET_ENV = (
+    "GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+    "ANTHROPIC_PLATFORM_API_KEY", "ANTHROPIC_AUTH_TOKEN", "LITELLM_MASTER_KEY",
+)
+
+
+def notes_section(notes: str) -> str:
+    """The PR's verification-notes section, or "" when there are no notes
+    (specs/012 data-model "Verification notes"). Secret values are redacted
+    and each `~~~` is escaped, so the model's text cannot close the fence;
+    only then is the text capped and fenced."""
+    notes = (notes or "").strip()
+    if not notes:
+        return ""
+    for var in NOTES_SECRET_ENV:
+        if secret := os.environ.get(var):
+            notes = notes.replace(secret, "***")
+    notes = notes.replace("~~~", "~~\\~")
+    if len(notes) > NOTES_CAP:
+        cut = "\n\n… (truncated)"
+        notes = notes[: NOTES_CAP - len(cut)] + cut
+    return f"{NOTES_HEADER}\n\n~~~text\n{notes}\n~~~"
+
+
+def push_and_open_pr(
+    checkout: Path, repo: str, branch: str, title: str, notes: str = "",
+) -> str:
     pr_body = _pr_body_from_spec(checkout)
+    section = notes_section(notes)
     _run(["git", "push", "-u", "origin", branch], cwd=checkout)
     body_path = checkout / ".pr-body.md"
-    body_path.write_text(pr_body)
+    body_path.write_text(f"{pr_body}\n\n{section}" if section else pr_body)
     try:
         return _run(
             [
@@ -470,9 +518,28 @@ def push_and_open_pr(checkout: Path, repo: str, branch: str, title: str) -> str:
             cwd=checkout,
         )
     except subprocess.CalledProcessError as e:
-        if "already exists" in (e.stderr or ""):
-            return e.stderr.strip()
-        raise
+        if "already exists" not in (e.stderr or ""):
+            raise
+        if section:
+            # The PR was opened earlier (architect stage, or an earlier build
+            # attempt), so the notes go in a comment. Its failure only warns:
+            # the commits and the PR are in place. It names the PR by URL: gh
+            # reads an all-digit branch as a PR number.
+            body_path.write_text(section)
+            try:
+                _run(
+                    ["gh", "pr", "comment", verify_pr_exists(repo, branch),
+                     "--body-file", str(body_path)],
+                    cwd=checkout,
+                )
+            except (subprocess.CalledProcessError, RuntimeError) as ce:
+                # RuntimeError: verify_pr_exists found no PR to comment on.
+                print(
+                    "warning: could not post the verification notes: "
+                    f"{(getattr(ce, 'stderr', None) or str(ce)).strip()}",
+                    file=sys.stderr,
+                )
+        return e.stderr.strip()
     finally:
         body_path.unlink(missing_ok=True)
 
@@ -500,6 +567,7 @@ async def run(
     # task but ran out before the PR step. Not on a Gate-feedback retry —
     # there every task is already [X] from the previous attempt, and the
     # feedback still has to be acted on.
+    notes = ""  # the model's verification notes; none when no session runs
     if feedback is None and all_tasks_done(checkout, branch):
         verify_left_main(checkout, branch)
     else:
@@ -513,23 +581,36 @@ async def run(
         task_ids = _open_task_ids(files[0]) if feedback is None and len(files) == 1 else None
         try:
             if task_ids:
-                await run_per_task(checkout, files[0], task_ids, usage, force_check, checkpointer)
+                notes = await run_per_task(
+                    checkout, files[0], task_ids, usage, force_check, checkpointer,
+                )
             else:
-                await run_implement(checkout, feedback, usage, force_check, checkpointer)
+                notes = await run_implement(checkout, feedback, usage, force_check, checkpointer)
         except (SeatExhausted, SeatInvalid):
             checkpointer()  # a tick the last message made, before pushing
             checkpoint_push(checkout, branch, sha_before)
             raise
         verify_left_main(checkout, branch)
-        checkpointer.finish()
+        committed = checkpointer.finish()
         # A successor seat (specs/011 F5) with every task done may find its
         # predecessor already committed and pushed this attempt's work — e.g.
         # a Gate-feedback fix. With tasks still open, no commit means no work:
         # fail as on the first seat (the Eval-Gate never looks at the diff).
         if _handoff_index() == 0 or has_open_tasks(checkout, branch):
             verify_new_commit(checkout, sha_before)
+        if not committed:  # specs/012 FR-011: no PR for partial work
+            # The checkout dies with the sandbox, so the task checkpoints
+            # already made are pushed (as on a seat outcome) for the next
+            # attempt to resume from; the uncommitted rest is lost.
+            checkpoint_push(checkout, branch, sha_before)
+            raise RuntimeError(
+                "The harness's final commit failed (see the checkpoint stderr "
+                f"above). The commits made before it were pushed to {branch} "
+                f"(now at {_head_sha(checkout)[:12]}); the edits after the last "
+                "one are lost with the checkout, and no PR was opened."
+            )
     title = f"Implement {branch}"
-    push_and_open_pr(checkout, repo, branch, title)
+    push_and_open_pr(checkout, repo, branch, title, notes=notes)
     return verify_pr_exists(repo, branch)
 
 

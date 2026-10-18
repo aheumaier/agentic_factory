@@ -1,14 +1,17 @@
 """Tests for the Claude Code hook scripts in .claude/hooks/ (feature 010).
 
 Each test drives the real bash scripts through subprocess with a synthetic
-JSON payload on stdin, inside a throwaway git repo with the hooks copied in
-and CLAUDE_PROJECT_DIR pointed at it (research R11). `uv` is a stub placed
-first on PATH: it logs its argv and returns the exit code/output a test sets
-per tool, so "suite red"/"suite green" need no network and no real suite.
-`git` and `jq` are real. The hook code has no test-only switches.
+JSON payload on stdin, inside a throwaway git repo with the hooks copied in.
+The scripts take their repo root from their own path (012 R2), so the copies
+judge the tmp repo; CLAUDE_PROJECT_DIR is still set, as Claude Code sets it.
+`uv` is a stub placed first on PATH: it logs its argv and returns the exit
+code/output a test sets per tool, so "suite red"/"suite green" need no
+network and no real suite. `timeout` is a stub too. `git` and `jq` are real.
+The hook code has no test-only switches.
 
-Layout under tmp_path: repo/ (the git repo), bin/uv (the stub),
-uv-calls.log, and <tool>.rc / <tool>.out for tool in ruff, pytest.
+Layout under tmp_path: repo/ (the git repo), bin/uv and bin/timeout (the
+stubs), uv-calls.log, timeout-calls.log, timeout.rc, and <tool>.rc /
+<tool>.out for tool in ruff, pytest.
 """
 import json
 import os
@@ -22,6 +25,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS_DIR = REPO_ROOT / ".claude" / "hooks"
+DENY_FORMAT = re.compile(r"^\[AF-[A-Z]+\] .+\. To proceed: .+$")
 
 # Uses only bash builtins, so it still works on the trimmed PATH of the
 # missing-tool tests. "run", --locked, --frozen and --directory <d> are
@@ -46,15 +50,28 @@ rc=0
 exit "$rc"
 """
 
+# Stands in for GNU timeout/gtimeout (012 R3): logs its argv, then exits with
+# timeout.rc when a test set one (124 = timed out, 137 = killed), otherwise
+# runs the command and returns its exit code. Bash builtins only, as above.
+_TIMEOUT_STUB = """#!/bin/bash
+T='{tmp}'
+(IFS=$'\\t'; printf '%s\\n' "$*") >> "$T/timeout-calls.log"
+[ -f "$T/timeout.rc" ] && exit "$(< "$T/timeout.rc")"
+case "${{1:-}}" in --kill-after=*) shift ;; esac
+shift
+"$@"
+"""
+
 
 def _clean_env() -> dict[str, str]:
     # Keep the operator's shell out of the fixture: a GIT_DIR from a git
     # hook would retarget every git call, and a launch-time
-    # AF_SPEC_EXCEPTION would change policy.sh's verdicts.
+    # AF_SPEC_EXCEPTION or AF_GATE_LIMIT would change the hooks' verdicts.
     return {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith("GIT_") and k not in ("AF_SPEC_EXCEPTION", "CLAUDE_PROJECT_DIR")
+        if not k.startswith("GIT_")
+        and k not in ("AF_SPEC_EXCEPTION", "AF_GATE_LIMIT", "CLAUDE_PROJECT_DIR")
     }
 
 
@@ -67,6 +84,10 @@ def git(repo: Path, *args: str) -> str:
 
 @pytest.fixture
 def harness_repo(tmp_path: Path) -> Path:
+    return _make_harness_repo(tmp_path)
+
+
+def _make_harness_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)
     git(repo, "init", "-q", "-b", "010-x")
@@ -84,10 +105,11 @@ def harness_repo(tmp_path: Path) -> Path:
     for script in HOOKS_DIR.glob("*.sh"):
         shutil.copy2(script, hooks / script.name)
 
-    stub = tmp_path / "bin" / "uv"
-    stub.parent.mkdir()
-    stub.write_text(_UV_STUB.format(tmp=tmp_path))
-    stub.chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    for name, body in (("uv", _UV_STUB), ("timeout", _TIMEOUT_STUB)):
+        stub = tmp_path / "bin" / name
+        stub.write_text(body.format(tmp=tmp_path))
+        stub.chmod(0o755)
     return repo
 
 
@@ -108,6 +130,14 @@ def run_hook(
         input=payload if isinstance(payload, str) else json.dumps(payload),
         capture_output=True, text=True, env=env, timeout=60,
     )
+
+
+def gate_limit(repo: Path) -> list[str]:
+    """The <n> of each logged `timeout --kill-after=5 <n>s <cmd…>` call."""
+    log = repo.parent / "timeout-calls.log"
+    if not log.exists():
+        return []
+    return [line.split("\t")[1].removesuffix("s") for line in log.read_text().splitlines()]
 
 
 def uv_calls(repo: Path) -> list[list[str]]:
@@ -311,7 +341,42 @@ def test_red_blocks_once_then_lets_go_with_a_notice(harness_repo):
     second = stop(repo, active=True)
     assert second.returncode == 0
     assert "still RED" in json.loads(second.stdout)["systemMessage"]
+    assert snapshot(repo).exists()  # FR-013: a double red keeps the baseline
+
+
+def _double_red_then_docs_turn(repo: Path) -> int:
+    """Turn 1 ends red twice; turn 2 changes only notes.md. Returns pytest calls so far."""
+    turn_start(repo)
+    (repo / "pkg" / "clean.py").write_text("VALUE = 2\n")
+    set_stub(repo, "pytest", 1, "FAILED tests/test_x.py::test_a - boom\n")
+    assert stop(repo).returncode == 2
+    assert stop(repo, active=True).returncode == 0
+    turn_start(repo)
+    (repo / "notes.md").write_text("docs only\n")
+    return len(calls_for(repo, "pytest"))
+
+
+def test_double_red_keeps_the_baseline_for_the_next_turn(harness_repo):
+    # SC-006: turn 1's pkg change is still judged in turn 2.
+    repo = harness_repo
+    before = _double_red_then_docs_turn(repo)
+    set_stub(repo, "pytest", 0)
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert len(calls_for(repo, "pytest")) > before
     assert not snapshot(repo).exists()
+
+
+def test_double_red_still_blocks_a_docs_only_next_turn(harness_repo):
+    repo = harness_repo
+    _double_red_then_docs_turn(repo)
+
+    result = stop(repo)
+
+    assert result.returncode == 2
+    assert "test_a" in result.stderr
 
 
 def test_every_failing_test_id_survives_trimming(harness_repo):
@@ -443,8 +508,9 @@ def test_missing_uv_fails_closed_only_where_uv_runs(harness_repo, tmp_path_facto
         payload = {"tool_input": {"file_path": str(repo / name)}}
         return run_hook(repo, "py-check.sh", ["edit"], payload, path=path)
 
-    def stop_no_uv() -> subprocess.CompletedProcess:
-        return run_hook(repo, "py-check.sh", ["stop"], {"session_id": "s1"}, path=path)
+    def stop_no_uv(active: bool = False, session: str = "s1") -> subprocess.CompletedProcess:
+        payload = {"session_id": session, "stop_hook_active": active}
+        return run_hook(repo, "py-check.sh", ["stop"], payload, path=path)
 
     assert edit("notes.md").returncode == 0
     py = edit("pkg/clean.py")
@@ -459,6 +525,19 @@ def test_missing_uv_fails_closed_only_where_uv_runs(harness_repo, tmp_path_facto
     changed = stop_no_uv()
     assert changed.returncode == 2
     assert "uv is required" in changed.stderr
+    # FR-012: a missing uv is a red run, so the retry is let go with a notice.
+    retry = stop_no_uv(active=True)
+    assert retry.returncode == 0, retry.stderr
+    notice = json.loads(retry.stdout)["systemMessage"]
+    assert "still RED" in notice
+    assert "uv is required" in notice
+    # FR-012: the guard is read before the uv check, so even a first
+    # stop_hook_active payload is not blocked.
+    turn_start(repo, "s2")
+    (repo / "pkg" / "other.py").write_text("y = 1\n")
+    guarded = stop_no_uv(active=True, session="s2")
+    assert guarded.returncode == 0, guarded.stderr
+    assert "uv is required" in json.loads(guarded.stdout)["systemMessage"]
 
 
 def test_session_id_is_sanitised_into_the_state_dir(harness_repo):
@@ -565,7 +644,7 @@ def test_own_pending_snapshot_short_circuits_adoption(harness_repo):
 # ---------------------------------------------------------------------------
 
 
-def policy(repo: Path, payload: dict, **kwargs) -> subprocess.CompletedProcess:
+def policy(repo: Path, payload: dict | str, **kwargs) -> subprocess.CompletedProcess:
     return run_hook(repo, "policy.sh", [], payload, **kwargs)
 
 
@@ -580,8 +659,16 @@ def assert_denied(result: subprocess.CompletedProcess, rule: str) -> str:
     assert out["hookEventName"] == "PreToolUse"
     assert out["permissionDecision"] == "deny"
     reason = out["permissionDecisionReason"]
-    assert re.match(rf"^\[{rule}\] .+\. To proceed: .+$", reason.splitlines()[0]), reason
+    first = reason.splitlines()[0]
+    # 012 data-model validation (T009): every deny shares one first-line format.
+    assert DENY_FORMAT.match(first), reason
+    assert first.startswith(f"[{rule}] "), reason
     return reason
+
+
+def deny_line(result: subprocess.CompletedProcess) -> str:
+    """The first non-empty stderr line, where exit-2 denies put their message."""
+    return next((line for line in result.stderr.splitlines() if line.strip()), "")
 
 
 def assert_no_decision(result: subprocess.CompletedProcess) -> None:
@@ -613,12 +700,47 @@ _SECRET_DENIED = [
         "cat .env", "grep KEY .env", "cat ./.env", "cat .env*",
         "cat .env{,.braintrust}", "source .env", "x=$(<.env)",
     )],
+    # 012 FR-007/FR-009 (R6): any case, and the wider leading/trailing delimiters.
+    *[("Bash", {"command": c}) for c in (
+        "cat .ENV", "cat .Env.Braintrust", "x=$(cat .env)", "`cat .env`",
+        "scp a@b:.env .", "cp {.env,x}", "echo a,.env", "less (.env)", "cat <.env",
+    )],
+    # 012 FR-009: the file tools' glob/pattern check shares SECRET_RE.
+    ("Glob", {"pattern": "{.env,x}"}),
+    ("Glob", {"pattern": "x:.env"}),
+    ("Grep", {"pattern": "KEY", "glob": "x,.env"}),
+    # 012 FR-009: `.env` in the last brace slot, and shell redirection writes.
+    *[("Bash", {"command": c}) for c in (
+        "cat {x,.env}", "echo x >.env", "echo x >>.env", "echo x 2>.env",
+    )],
+    ("Grep", {"pattern": "KEY", "glob": "{x,.env}"}),
+    ("Glob", {"pattern": "{x,.env}"}),
+    # 012 FR-006: the whole glob is checked, not its basename, and a leading
+    # wildcard can stand for the dot's left side (ripgrep's `*` matches `.env`).
+    ("Grep", {"pattern": "KEY", "glob": "{.env,pkg/x.py}"}),
+    ("Grep", {"pattern": "KEY", "glob": "*.env"}),
+    ("Glob", {"pattern": "**/*.env"}),
 ]
 _SECRET_ALLOWED = [
     ("Read", {"file_path": "{repo}/.env.example"}),
     ("Glob", {"pattern": "**/.env.example"}),
     ("Grep", {"pattern": ".env", "glob": "*.py"}),
     *[("Bash", {"command": c}) for c in ("cat .env.example", "echo $HOME", "ls")],
+    # 012 FR-007/FR-009: .env.example and .environment in the new spellings.
+    *[("Bash", {"command": c}) for c in (
+        "cat .ENV.EXAMPLE", "x=$(cat .env.example)", "`cat .env.example`",
+        "scp a@b:.env.example .", "cp {.env.example,x}", "echo a,.env.example",
+        "less (.env.example)", "cat <.env.example", "cat .environment",
+    )],
+    ("Read", {"file_path": "{repo}/.ENV.EXAMPLE"}),
+    ("Read", {"file_path": "{repo}/.environment"}),
+    ("Grep", {"pattern": "KEY", "glob": "x,.env.example"}),
+    ("Grep", {"pattern": "KEY", "path": "{repo}/.environment"}),
+    ("Glob", {"pattern": "{.env.example,x}"}),
+    ("Glob", {"pattern": "x:.environment"}),
+    *[("Bash", {"command": c}) for c in ("echo x >.env.example", "cat {x,.env.example}")],
+    ("Glob", {"pattern": "{x,.env.example}"}),
+    ("Glob", {"pattern": "**/*.env.example"}),
 ]
 
 
@@ -644,6 +766,31 @@ def test_non_secret_reads_are_allowed(harness_repo, tool, tool_input):
     repo = harness_repo
 
     assert_no_decision(policy(repo, _tool_payload(repo, tool, tool_input)))
+
+
+MSG_SECRET_SHELL = (
+    "[AF-SECRET] Shell commands may not name .env or .env.braintrust: these files hold "
+    "live credentials, and reading, writing or copying them from the shell is refused. "
+    "To proceed: use .env.example for variable names and ask the operator for any value "
+    "you need. If the command only mentions the name as text (a commit message, a search "
+    "string), write that text to a file and pass the file (git commit -F <file>, "
+    "grep -f <file>), or ask the operator."
+)  # 012 FR-007: the message also says what to do when the name is only text.
+
+
+def test_shell_secret_message_says_naming(harness_repo):
+    # 012 FR-007: a Bash deny names the act (naming the file from the shell);
+    # a Read deny keeps the 010 message.
+    repo = harness_repo
+
+    shell = assert_denied(policy(repo, bash("cat .env")), "AF-SECRET").splitlines()[0]
+    read = assert_denied(
+        policy(repo, _tool_payload(repo, "Read", {"file_path": "{repo}/.env"})), "AF-SECRET"
+    )
+
+    assert shell == MSG_SECRET_SHELL
+    assert "may not name" in shell
+    assert read.startswith("[AF-SECRET] .env and .env.braintrust hold live credentials")
 
 
 def _edit(repo: Path, rel: str, tool: str = "Edit") -> dict:
@@ -689,6 +836,84 @@ def test_unguarded_paths_need_no_feature(harness_repo, rel):
     switch(repo, "scratch")
 
     assert_no_decision(policy(repo, _edit(repo, rel)))
+
+
+@pytest.mark.parametrize("spelling", ["absolute", "relative"])
+def test_root_comes_from_the_script_not_the_env(harness_repo, tmp_path_factory, spelling):
+    # FR-002 (R2): a CLAUDE_PROJECT_DIR naming another checkout must not decide
+    # which branch AF-SPEC judges; the repo the scripts live in does. With ROOT
+    # taken from the env, the relative path was judged on B's planned branch
+    # and allowed, and the absolute one lay outside B and got no decision.
+    a = harness_repo
+    switch(a, "main")
+    b = _make_harness_repo(tmp_path_factory.mktemp("b"))
+    switch(b, "042-x", tasks=True)
+    payload = _edit(a, "harness/x.py")
+    if spelling == "relative":
+        payload["tool_input"]["file_path"] = "harness/x.py"
+
+    result = policy(a, payload, env_extra={"CLAUDE_PROJECT_DIR": str(b)})
+
+    reason = assert_denied(result, "AF-SPEC")
+    assert "branch: main" in reason.splitlines()[1:]
+
+
+def test_no_hook_script_reads_claude_project_dir():
+    # FR-002 (R2): only the launcher reads CLAUDE_PROJECT_DIR. A script that
+    # reads it again would judge the launch worktree instead of its own.
+    assert [p.name for p in HOOKS_DIR.glob("*.sh") if "CLAUDE_PROJECT_DIR" in p.read_text()] == []
+
+
+_GUARDED_SPELLINGS = [
+    "harness/./x.py", "pkg/../harness/x.py", "./harness/x.py", "harness//x.py",
+    "Harness/x.py", "HARNESS/x.py",
+]
+
+
+@pytest.mark.parametrize("spelling", ["absolute", "relative"])
+@pytest.mark.parametrize(
+    ("rel", "verdict"),
+    [
+        *[(rel, "guarded") for rel in _GUARDED_SPELLINGS],
+        ("harness/../pkg/x.py", "unguarded"),
+        ("harnessx/x.py", "unguarded"),
+        ("../../outside.py", "outside"),
+    ],
+)
+def test_path_spellings_are_normalised(harness_repo, rel, verdict, spelling):
+    # FR-008 (R7): `.`, `..`, doubled slashes and a capitalised first segment
+    # are resolved as text before the guarded-dir match. A string, not
+    # `repo / rel`: pathlib would already collapse `./` and `//`.
+    repo = harness_repo
+    switch(repo, "main")
+    path = f"{repo}/{rel}" if spelling == "absolute" else rel
+
+    result = policy(repo, {"tool_name": "Edit", "tool_input": {"file_path": path}})
+
+    if verdict == "guarded":
+        assert "branch: main" in assert_denied(result, "AF-SPEC").splitlines()[1:]
+    else:
+        assert_no_decision(result)
+
+
+def test_climbing_out_and_back_into_the_root_is_guarded(harness_repo):
+    # FR-008 (data-model "AF-SPEC path" step 2): `..` runs on the whole
+    # absolute path, so <root>/../<rootname>/harness/x.py lands inside ROOT.
+    repo = harness_repo
+    switch(repo, "main")
+    path = f"{repo}/../{repo.name}/harness/x.py"
+
+    assert_denied(policy(repo, {"tool_name": "Edit", "tool_input": {"file_path": path}}), "AF-SPEC")
+
+
+def test_dotdot_at_the_filesystem_root_stays_there(harness_repo):
+    # FR-008 (data-model "AF-SPEC path" step 2): the kernel reads `/..` as `/`,
+    # so /..<root>/harness/x.py writes the guarded file and must be judged.
+    repo = harness_repo
+    switch(repo, "main")
+    path = f"/..{repo}/harness/x.py"
+
+    assert_denied(policy(repo, {"tool_name": "Edit", "tool_input": {"file_path": path}}), "AF-SPEC")
 
 
 def test_paths_outside_the_repo_are_ignored(harness_repo, tmp_path_factory):
@@ -764,7 +989,13 @@ def test_commit_shapes_are_gated(harness_repo, command):
     assert_denied(policy(repo, bash(command)), "AF-COMMIT")
 
 
-@pytest.mark.parametrize("command", ["git status", "git log --grep=committee", "echo gitcommit"])
+@pytest.mark.parametrize(
+    "command",
+    # FR-005: `echo rebase` added (a verb without the word git). `git log
+    # --grep=merge` is gated by the 012 contract table (`=` is a word boundary),
+    # so it is in test_commit_making_verbs_are_gated instead.
+    ["git status", "git log --grep=committee", "echo gitcommit", "echo rebase"],
+)
 def test_non_commit_commands_run_no_gate(harness_repo, command):
     repo = harness_repo
 
@@ -789,6 +1020,191 @@ def test_secret_rule_runs_before_the_commit_gate(harness_repo):
 
     assert_denied(policy(repo, bash("cat .env && git commit")), "AF-SECRET")
     assert uv_calls(repo) == []
+
+
+# ---------------------------------------------------------------------------
+# 012 US1: gate time limit (FR-003, R3), input check (FR-004, R4), git verbs
+# (FR-005, R5)
+# ---------------------------------------------------------------------------
+
+
+def _stop_after_a_change(repo: Path, path: str | None = None) -> subprocess.CompletedProcess:
+    turn_start(repo)
+    (repo / "pkg" / "new.py").write_text("x = 1\n")
+    return run_hook(repo, "py-check.sh", ["stop"], {"session_id": "s1"}, path=path)
+
+
+@pytest.mark.parametrize(
+    ("value", "limit"),
+    [(None, "240"), ("1000", "240"), ("abc", "240"), ("0", "240"), ("-5", "240"), ("30", "30")],
+)
+def test_gate_limit_is_clamped(harness_repo, value, limit):
+    repo = harness_repo
+    env = {} if value is None else {"AF_GATE_LIMIT": value}
+
+    assert_no_decision(policy(repo, bash("git commit -m x"), env_extra=env))
+
+    # FR-003: SECONDS counts whole seconds, so a clock tick between the gate's
+    # start and its first step may hand that step one second less.
+    first = [int(n) for n in gate_limit(repo)[:1]]
+    assert first in ([int(limit)], [int(limit) - 1])
+
+
+def test_gate_steps_share_one_deadline(harness_repo):
+    repo = harness_repo
+    # FR-003: each step takes over a second, so a shared deadline must hand each
+    # later step strictly less time; a limit reset per step would not.
+    stub = repo.parent / "bin" / "timeout"
+    stub.write_text(stub.read_text().replace("\n[ -f", "\nsleep 1.1\n[ -f", 1))
+
+    assert_no_decision(policy(repo, bash("git commit -m x"), env_extra={"AF_GATE_LIMIT": "30"}))
+
+    limits = [int(n) for n in gate_limit(repo)]
+    assert len(limits) == 3  # ruff + two suites
+    assert limits[0] in (29, 30)  # FR-003: a SECONDS tick may take one second
+    assert limits[0] > limits[1] > limits[2] >= 1
+
+
+@pytest.mark.parametrize("rc", [124, 137])
+def test_gate_timeout_denies_the_commit(harness_repo, rc):
+    repo = harness_repo
+    (repo.parent / "timeout.rc").write_text(str(rc))
+
+    reason = assert_denied(policy(repo, bash("git commit -m x")), "AF-COMMIT")
+
+    assert "timed out after" in reason.splitlines()[0]
+    assert len(gate_limit(repo)) == 1  # the gate stops at the first timed-out step
+    stopped = _stop_after_a_change(repo)
+    assert stopped.returncode == 2
+    assert "TIMED OUT" in stopped.stderr and "timed out" in stopped.stderr
+
+
+def test_gate_without_a_timeout_tool_denies(harness_repo, tmp_path_factory):
+    repo = harness_repo
+    # _PATH_TOOLS has neither timeout nor gtimeout, so this PATH has no runner.
+    path = _path_without(tmp_path_factory.mktemp("path"), repo, "timeout")
+
+    # The contract keeps AF-COMMIT a JSON deny; only AF-HOOKS goes to stderr.
+    reason = assert_denied(policy(repo, bash("git commit -m x"), path=path), "AF-COMMIT")
+
+    assert "brew install coreutils" in reason.splitlines()[0]
+    assert uv_calls(repo) == []
+    stopped = _stop_after_a_change(repo, path=path)
+    assert stopped.returncode == 2
+    assert "brew install coreutils" in stopped.stderr
+
+
+@pytest.mark.parametrize("payload", ["", "{not json", "[]", '"x"', {}, {"tool_name": 3}])
+def test_policy_denies_empty_or_invalid_input(harness_repo, payload):
+    repo = harness_repo
+
+    result = policy(repo, payload)
+
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "[AF-HOOKS] The repo policy hook got no valid input" in result.stderr
+    assert DENY_FORMAT.match(deny_line(result)), result.stderr
+    assert uv_calls(repo) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git revert HEAD",
+        "git cherry-pick abc",
+        "git merge x",
+        "git am p.patch",
+        "git rebase main",
+        "git pull",
+        "git pull --rebase",
+        "git rebase --skip",
+        "git rebase --continue",
+        "git -c a=b merge x",
+        "git pull --ff-only; git commit",
+        "git pull --ff-only $(x)",
+        "git com\\\nmit",
+        # every "gated" row of the contract's AF-COMMIT table
+        "git commit -m x",
+        'git commit -m "allow git rebase --abort"',
+        'git merge topic -m "see --abort"',
+        "git rebase --abort && git commit -m x",
+        "git cherry-pick --skip",
+        "git merge --no-ff topic",
+        "git -c pull.rebase=true pull --ff-only",
+        "git pull --ff-only -r",
+        "git pull --ff-only --no-ff",
+        "git -C $(git${IFS}commit${IFS}-qam${IFS}x) rebase --abort",
+        "git rebase --abort 2>/dev/null",
+        "git status && git am x.patch",
+        "git log --grep=merge",
+        "echo commit; git status",
+        "for v in commit; do git $v; done",
+        # an exempt shape needs exactly one verb word
+        "git -C merge merge --abort",
+        # quotes and backslashes are meta: the shell strips them, so a quoted
+        # option is still an option (FR-005)
+        'git pull --ff-only "--no-ff"',
+        "git pull --ff-only '--rebase'",
+        r"git pull --ff-only \--no-ff",
+        'git pull --ff-only ""--no-ff',
+        "git pull --ff-only '-r'",
+        # brace and glob characters are meta too: the shell expands them into
+        # an option after the check (FR-005)
+        "git pull --ff-only {--no-ff,}",
+        "git pull --ff-only {--no-ff,origin}",
+        "git pull --ff-only [-]-no-ff",
+        "git pull --ff-only ?-no-ff",
+        "git pull --ff-only *",
+    ],
+)
+def test_commit_making_verbs_are_gated(harness_repo, command):
+    repo = harness_repo
+    set_stub(repo, "pytest", 1, "FAILED tests/test_x.py::test_a - boom\n")
+
+    assert_denied(policy(repo, bash(command)), "AF-COMMIT")
+
+
+@pytest.mark.parametrize(
+    ("command", "pull_rebase"),
+    [
+        ("git rebase --abort", None),
+        ("git -C /x merge --quit", None),
+        ("git -C ../wt merge --quit", None),
+        ("git cherry-pick --abort", None),
+        ("git revert --quit", None),
+        ("git am --abort", None),
+        ("git pull --ff-only", None),
+        ("git pull --ff-only", "false"),
+        ("git pull --ff-only origin main", None),
+    ],
+)
+def test_exempt_verbs_run_no_gate(harness_repo, command, pull_rebase):
+    repo = harness_repo
+    if pull_rebase is not None:
+        git(repo, "config", "pull.rebase", pull_rebase)
+    # The developer's own git config must not decide the pull verdict.
+    env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
+    assert_no_decision(policy(repo, bash(command), env_extra=env))
+    assert uv_calls(repo) == []
+
+
+def test_pull_ff_only_is_gated_when_pull_rebase_is_set(harness_repo):
+    repo = harness_repo
+    git(repo, "config", "pull.rebase", "true")
+    set_stub(repo, "pytest", 1, "FAILED tests/test_x.py::test_a - boom\n")
+
+    assert_denied(policy(repo, bash("git pull --ff-only")), "AF-COMMIT")
+
+
+def test_af_commit_message_names_the_verbs(harness_repo):
+    repo = harness_repo
+    set_stub(repo, "pytest", 1, "FAILED tests/test_x.py::test_a - boom\n")
+
+    first = assert_denied(policy(repo, bash("git merge x")), "AF-COMMIT").splitlines()[0]
+
+    assert re.match(r"^\[AF-COMMIT\] .+\. To proceed: .+$", first), first
+    for verb in ("commit", "revert", "cherry-pick", "merge", "am", "rebase", "pull"):
+        assert re.search(rf"\b{verb}\b", first), verb
 
 
 # ---------------------------------------------------------------------------
@@ -928,7 +1344,7 @@ def test_context_reads_only_the_transcript_tail(harness_repo, entries, warned):
 # US4: continuity context after /compact or /clear (T035, SC-009)
 # ---------------------------------------------------------------------------
 
-_RULES = ("AF-SPEC", "AF-SECRET", "AF-COMMIT", "AF-REGISTRY", "AF-HARNESS")
+_RULES = ("AF-SPEC", "AF-SECRET", "AF-COMMIT", "AF-REGISTRY", "AF-HARNESS", "AF-HOOKS")  # FR-014
 
 
 def session_context(repo: Path, source: str, **kwargs) -> str:
@@ -1096,6 +1512,64 @@ def test_stop_and_policy_fail_closed_without_tools(
     assert f"{missing} is required" in result.stderr
 
 
+def _run_without_root(repo: Path, script: str, args: list[str]) -> subprocess.CompletedProcess:
+    """Run a hook copy from its own dir with the repo dir at mode 0, so the
+    script's `cd <script dir>/../..` fails. bash's own startup warnings
+    (shell-init:, chdir:), caused by that cwd, are dropped from stderr."""
+    switch(repo, "main")
+    env = _clean_env()
+    env["PATH"] = f"{repo.parent / 'bin'}{os.pathsep}{env['PATH']}"
+    run = 'r=$1 s=$2; shift 2; chmod 0 "$r" && exec /bin/bash "./$s" "$@"'
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-c", run, "sh", str(repo), script, *args],
+            cwd=repo / ".claude" / "hooks", input=json.dumps(_edit(repo, "harness/x.py")),
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+    finally:
+        repo.chmod(0o755)
+    lines = result.stderr.splitlines(keepends=True)
+    result.stderr = "".join(s for s in lines if not s.startswith(("shell-init:", "chdir:")))
+    return result
+
+
+_NEEDS_DIR_PERMISSIONS = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores directory permissions, so chmod 0 cannot make cd fail"
+)
+
+
+@_NEEDS_DIR_PERMISSIONS
+@pytest.mark.parametrize(("script", "args"), [("policy.sh", []), ("py-check.sh", ["edit"])])
+def test_policy_and_edit_fail_closed_without_a_root(harness_repo, script, args):
+    # FR-002 (R2), 012 fix round: ROOT comes from `cd <script dir>/../..`. If
+    # that cd fails, an empty ROOT makes every absolute path look outside the
+    # repo, so AF-SPEC and the edit lint would pass the call unchecked.
+    result = _run_without_root(harness_repo, script, args)
+
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "cannot resolve the repo root" in result.stderr
+
+
+@_NEEDS_DIR_PERMISSIONS
+def test_policy_without_a_root_is_an_af_hooks_deny(harness_repo):
+    # FR-002 + data-model validation: policy.sh's exit-2 refusal is an AF-HOOKS
+    # deny, so its first line names the rule and a way to proceed.
+    first = deny_line(_run_without_root(harness_repo, "policy.sh", []))
+
+    assert DENY_FORMAT.match(first), first
+    assert first.startswith("[AF-HOOKS] "), first
+
+
+@_NEEDS_DIR_PERMISSIONS
+def test_turn_start_without_a_root_keeps_the_prompt(harness_repo):
+    # FR-002, 012 fix round: turn-start always exits 0 (an exit 2 from
+    # UserPromptSubmit erases the operator's prompt), as with a lib.sh failure.
+    result = _run_without_root(harness_repo, "py-check.sh", ["turn-start"])
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
 # ---------------------------------------------------------------------------
 # US2 + US4: the real .claude/settings.json wiring and permission rules (T038)
 # ---------------------------------------------------------------------------
@@ -1164,26 +1638,550 @@ def test_permission_rules_cover_exactly_the_intended_paths(
     assert any(_rule_covers(r, tool, rel) for r in rules) is covered
 
 
-def test_settings_wire_every_hook(settings):
+# FR-001: replaces test_settings_wire_every_hook. Every command is now the 012
+# launcher, so the old `.endswith("py-check.sh stop")` checks no longer hold.
+_PRE_MATCHER = "Edit|Write|MultiEdit|NotebookEdit|Read|Grep|Glob|Bash"
+_ENTRIES = [
+    # (event, matcher, script, args, timeout; None = unchanged, not asserted)
+    ("PreToolUse", _PRE_MATCHER, "policy.sh", "", 300),
+    ("PostToolUse", "Edit|Write|MultiEdit", "py-check.sh", " edit", None),
+    ("UserPromptSubmit", None, "py-check.sh", " turn-start", None),
+    ("Stop", None, "py-check.sh", " stop", 300),
+    ("SessionStart", "compact|clear", "session-context.sh", "", None),
+]
+
+
+def _hook(settings: dict, event: str, matcher: str | None) -> dict:
+    entries = [e for e in settings["hooks"][event] if e.get("matcher") == matcher]
+    assert len(entries) == 1, (event, matcher)
+    return entries[0]["hooks"][0]
+
+
+def test_policy_hook_covers_every_guarded_tool(settings):
     pre = [e for e in settings["hooks"]["PreToolUse"] if "policy.sh" in e["hooks"][0]["command"]]
     assert len(pre) == 1
     assert set(pre[0]["matcher"].split("|")) == {
         "Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Grep", "Glob", "Bash"
     }
-    assert _command(settings, "UserPromptSubmit").endswith("py-check.sh turn-start")
-    assert _command(settings, "PostToolUse", "Edit|Write|MultiEdit").endswith(
-        "py-check.sh edit"
+
+
+@pytest.mark.parametrize(("event", "matcher", "script", "args", "timeout"), _ENTRIES)
+def test_every_hook_uses_the_launcher(settings, event, matcher, script, args, timeout):
+    hook = _hook(settings, event, matcher)
+    cmd = hook["command"]
+    if timeout is not None:
+        assert hook["timeout"] == timeout
+
+    assert "git rev-parse --show-cdup" in cmd
+    assert "--show-toplevel" not in cmd
+    assert '"$CLAUDE_PROJECT_DIR"' in cmd
+    assert f'bash "$r/.claude/hooks/{script}"{args};' in cmd
+    message = cmd[cmd.index("[AF-HOOKS]"):]
+    message = message[: message.index("Claude Code.") + len("Claude Code.")]
+    assert "'" not in message
+    assert f"(.claude/hooks/{script})" in message
+    syntax = subprocess.run(["/bin/sh", "-n", "-c", cmd], capture_output=True, text=True)
+    assert syntax.returncode == 0, syntax.stderr
+    if shutil.which("shellcheck"):
+        lint = subprocess.run(
+            ["shellcheck", "-s", "sh", "-"], input=cmd + "\n", capture_output=True, text=True
+        )
+        assert lint.returncode == 0, lint.stdout
+
+
+def test_gate_limit_is_below_the_hook_timeouts(settings):
+    lib = (HOOKS_DIR / "lib.sh").read_text()
+    default = re.search(r"\$\{AF_GATE_LIMIT:-(\d+)\}", lib)
+    assert default, "lib.sh sets no AF_GATE_LIMIT default"
+    for event, matcher in (("PreToolUse", _PRE_MATCHER), ("Stop", None)):
+        assert int(default.group(1)) + 10 < _hook(settings, event, matcher)["timeout"], event
+
+
+def _launch(cmd: str, payload: dict, project_dir: Path) -> subprocess.CompletedProcess:
+    """Run a settings.json hook command the way Claude Code does: /bin/sh -c."""
+    env = _clean_env()
+    env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+    return subprocess.run(
+        ["/bin/sh", "-c", cmd], input=json.dumps(payload),
+        capture_output=True, text=True, env=env, timeout=60,
     )
-    assert _command(settings, "Stop").endswith("py-check.sh stop")
+
+
+@pytest.mark.parametrize(
+    "case", ["cwd-wins", "cwd-over-project-dir", "project-dir-fallback", "symlinked-cwd"]
+)
+def test_launcher_finds_scripts(settings, harness_repo, tmp_path_factory, case):
+    repo = harness_repo
+    switch(repo, "main")
+    cmd = _command(settings, "PreToolUse", _PRE_MATCHER)
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    gone = elsewhere / "removed-worktree"  # never created
+    # (d): the cwd and file_path are spelled through a symlink to the repo. A
+    # launcher built on --show-toplevel would get the physical root, and the
+    # edit would fall outside it with no decision (012 fix round, 2026-10-13).
+    link = elsewhere / "link"
+    link.symlink_to(repo)
+    # Both hold the scripts: the launch dir is on a planned feature, so its
+    # policy.sh would see the edit outside its root and stay silent. Only the
+    # cwd's copy denies (FR-002, lookup order).
+    planned = _make_harness_repo(tmp_path_factory.mktemp("planned"))
+    switch(planned, "042-x", tasks=True)
+    root, cwd, project_dir = {
+        "cwd-wins": (repo, repo, gone),
+        "cwd-over-project-dir": (repo, repo, planned),
+        "project-dir-fallback": (repo, elsewhere, repo),
+        "symlinked-cwd": (link, link, gone),
+    }[case]
+    payload = {**_edit(root, "harness/x.py"), "cwd": str(cwd)}
+
+    assert_denied(_launch(cmd, payload, project_dir), "AF-SPEC")
+
+
+@pytest.mark.parametrize(("event", "matcher", "script", "args", "timeout"), _ENTRIES)
+def test_launcher_without_scripts_fails_safe(
+    settings, tmp_path_factory, event, matcher, script, args, timeout
+):
+    empty = tmp_path_factory.mktemp("noscripts")
+    cmd = _command(settings, event, matcher)
+
+    result = _launch(cmd, {"cwd": str(empty), "tool_name": "Bash"}, empty / "gone")
+
+    expected = f"[AF-HOOKS] The repo hook scripts (.claude/hooks/{script}) were not found"
+    if event == "PreToolUse":
+        assert result.returncode == 2
+        assert expected in result.stderr
+        assert DENY_FORMAT.match(deny_line(result)), result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        message = json.loads(result.stdout)["systemMessage"]
+        assert message.startswith(expected)
+        assert DENY_FORMAT.match(message), message
 
 
 def test_settings_wire_context_continuity_and_cap(settings):
-    assert _command(settings, "SessionStart", "compact|clear").endswith(
-        "/.claude/hooks/session-context.sh"
-    )
+    # FR-001: the session-context command check moved to
+    # test_every_hook_uses_the_launcher.
     assert "PreCompact" not in settings["hooks"]
 
     lib = (HOOKS_DIR / "lib.sh").read_text()
     budget = re.search(r"^CTX_BUDGET=(\d+)$", lib, re.MULTILINE)
     assert budget
     assert settings["env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == budget.group(1)
+
+
+# ---------------------------------------------------------------------------
+# 012 US3: rebase (FR-014, R10), lib load (FR-015, R11), prune (FR-016, R12),
+# context after compaction (FR-017, R13)
+# ---------------------------------------------------------------------------
+
+
+def fake_rebase(repo: Path, branch: str, state: str = "rebase-merge", at: str = "HEAD") -> None:
+    """Detach at `at` and leave the head-name file a stopped rebase leaves.
+
+    A real `git rebase` with nothing to replay finishes at once and leaves no
+    such file, so the tests write it the way git does.
+    """
+    git(repo, "checkout", "-q", "--detach", at)
+    head_name = Path(git(repo, "rev-parse", "--git-path", f"{state}/head-name").strip())
+    head_name = head_name if head_name.is_absolute() else repo / head_name
+    head_name.parent.mkdir(parents=True, exist_ok=True)
+    head_name.write_text(f"refs/heads/{branch}\n")
+
+
+def _record(repo: Path, rel: str, message: str) -> None:
+    """Record only `rel`: the fixture's hooks are untracked and must survive a detach."""
+    git(repo, "add", "--", rel)
+    git(repo, "commit", "-q", "-m", message)
+
+
+@pytest.mark.parametrize("state", ["rebase-merge", "rebase-apply"])
+def test_rebase_on_a_planned_branch_allows_guarded_edits(harness_repo, state):
+    repo = harness_repo
+    switch(repo, "042-x", tasks=True)
+    _record(repo, "specs", "tasks")
+    fake_rebase(repo, "042-x", state)
+
+    assert_no_decision(policy(repo, _edit(repo, "harness/x.py")))
+
+
+def test_rebase_reads_tasks_from_the_branch_tip(harness_repo):
+    repo = harness_repo
+    switch(repo, "042-x", tasks=True)
+    _record(repo, "specs", "tasks")
+    fake_rebase(repo, "042-x", at="HEAD~1")
+    assert not (repo / "specs" / "042-x" / "tasks.md").exists()
+
+    assert_no_decision(policy(repo, _edit(repo, "harness/x.py")))
+    # The resume block reads the next tasks from the tip, not "no tasks.md".
+    ctx = session_context(repo, "compact")
+    assert "- spec dir: specs/042-x/ (on the tip of 042-x only" in ctx
+    assert "\n  - [ ] T001 x" in ctx
+    assert "no tasks.md" not in ctx
+
+
+def test_rebase_resume_block_follows_the_tip_tasks_dir(harness_repo):
+    """FR-014: the disk has specs/042-a/ (no tasks.md), the tip has specs/042-b/tasks.md.
+
+    policy.sh allows the edit from the tip, so the resume block must read the
+    same file, not report "no tasks.md" for the dir on disk.
+    """
+    repo = harness_repo
+    switch(repo, "042-x")
+    (repo / "specs" / "042-a").mkdir(parents=True)
+    (repo / "specs" / "042-a" / "spec.md").write_text("spec\n")
+    _record(repo, "specs", "spec")
+    (repo / "specs" / "042-b").mkdir()
+    (repo / "specs" / "042-b" / "tasks.md").write_text("- [ ] T001 x\n")
+    _record(repo, "specs", "tasks")
+    fake_rebase(repo, "042-x", at="HEAD~1")
+    assert not (repo / "specs" / "042-b").exists()
+
+    assert_no_decision(policy(repo, _edit(repo, "harness/x.py")))
+    ctx = session_context(repo, "compact")
+    assert (
+        "- spec dir: specs/042-b/ (on the tip of 042-x only:"
+        " git show refs/heads/042-x:specs/042-b/tasks.md)"
+    ) in ctx
+    assert "\n  - [ ] T001 x" in ctx
+    assert "no tasks.md" not in ctx
+
+
+def test_branch_tip_tasks_count_only_during_a_rebase(harness_repo):
+    """FR-014 is scoped to a rebase: an attached branch needs tasks.md on disk."""
+    repo = harness_repo
+    switch(repo, "042-x", tasks=True)
+    _record(repo, "specs", "tasks")
+    (repo / "specs" / "042-x" / "tasks.md").unlink()
+    (repo / "specs" / "042-x").rmdir()
+
+    assert_denied(policy(repo, _edit(repo, "harness/x.py")), "AF-SPEC")
+    assert session_context(repo, "compact") == ""
+
+
+def test_rebase_of_an_unplanned_branch_is_denied(harness_repo):
+    repo = harness_repo
+    switch(repo, "042-x")
+    (repo / "notes.md").write_text("no plan\n")
+    _record(repo, "notes.md", "no tasks")
+    fake_rebase(repo, "042-x", at="HEAD~1")
+
+    reason = assert_denied(policy(repo, _edit(repo, "harness/x.py")), "AF-SPEC")
+    assert "branch: 042-x" in reason
+
+
+def test_session_context_names_the_branch_during_a_rebase(harness_repo):
+    repo = harness_repo
+    feature(repo, "042-x", _TASKS)
+    fake_rebase(repo, "042-x")
+
+    ctx = session_context(repo, "compact")
+
+    assert "- branch: 042-x\n" in ctx
+    assert "AF-HOOKS" in ctx
+
+
+_AF_HOOKS_LIB = (
+    "[AF-HOOKS] .claude/hooks/lib.sh could not be loaded, so every covered tool call is"
+    " refused. To proceed: from a terminal outside Claude Code, run git checkout HEAD --"
+    " .claude/hooks/lib.sh (in a stopped rebase or merge, run git rebase --abort or git"
+    " merge --abort first, or fix the conflict or syntax error in an editor), then retry."
+)
+
+
+@pytest.mark.parametrize("case", ["deleted", "syntax-error"])
+def test_policy_without_lib_names_the_recovery(harness_repo, case):
+    repo = harness_repo
+    lib = repo / ".claude" / "hooks" / "lib.sh"
+    if case == "deleted":
+        lib.unlink()
+    else:
+        with lib.open("a") as f:
+            f.write("if then\n")
+
+    result = policy(repo, bash("git status"))
+
+    assert result.returncode == 2
+    assert deny_line(result) == _AF_HOOKS_LIB
+    assert DENY_FORMAT.match(_AF_HOOKS_LIB)
+
+
+def test_policy_with_an_incomplete_lib_fails_closed(harness_repo):
+    # FR-015: a lib.sh that loads but defines no functions must not let a
+    # guarded edit through (each helper would just return 127).
+    repo = harness_repo
+    (repo / ".claude" / "hooks" / "lib.sh").write_text("GATE_LIMIT=240\n")
+
+    result = policy(repo, _edit(repo, "harness/x.py"))
+
+    assert result.returncode == 2
+    assert deny_line(result) == _AF_HOOKS_LIB
+
+
+def test_policy_turns_an_unexpected_error_into_a_deny(harness_repo):
+    # FR-015: any exit other than 0 or 2 (here set -u on an unset variable)
+    # would be a non-blocking hook error, so the call would go through.
+    repo = harness_repo
+    with (repo / ".claude" / "hooks" / "lib.sh").open("a") as f:
+        f.write("unset GATE_LIMIT\n")
+
+    result = policy(repo, bash("git status"))
+
+    assert result.returncode == 2
+    # bash's own error comes first and is kept: it names the cause.
+    last = result.stderr.strip().splitlines()[-1]
+    assert last.startswith("[AF-HOOKS] policy.sh stopped on an unexpected error (exit 1)")
+    assert DENY_FORMAT.match(last)
+
+
+def _py_check_edit(repo: Path, rel: str) -> subprocess.CompletedProcess:
+    return run_hook(repo, "py-check.sh", ["edit"], {"tool_input": {"file_path": str(repo / rel)}})
+
+
+@pytest.mark.parametrize("mode", ["stop", "edit"])
+def test_py_check_with_an_incomplete_lib_fails_closed(harness_repo, mode):
+    # US1 (no fail-open path), as FR-015 for policy.sh: a lib.sh that loads
+    # but defines no helpers must not end the turn or the edit green with no
+    # ruff or pytest run (each helper would just return 127).
+    repo = harness_repo
+    (repo / "pkg" / "new.py").write_text("VALUE = 1\n")
+    (repo / ".claude" / "hooks" / "lib.sh").write_text("GATE_LIMIT=240\n")
+
+    result = stop(repo) if mode == "stop" else _py_check_edit(repo, "pkg/new.py")
+
+    assert result.returncode == 2
+    assert "py-check.sh: cannot load lib.sh" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["stop", "edit"])
+def test_py_check_turns_an_unexpected_error_into_a_block(harness_repo, mode):
+    # US1, as FR-015 for policy.sh: any exit other than 0 or 2 (here set -u on
+    # an unset variable) is a non-blocking hook error, so the turn or the edit
+    # would pass with no verdict.
+    repo = harness_repo
+    (repo / "pkg" / "new.py").write_text("VALUE = 1\n")
+    with (repo / ".claude" / "hooks" / "lib.sh").open("a") as f:
+        f.write("unset failures\n")
+
+    result = stop(repo) if mode == "stop" else _py_check_edit(repo, "pkg/new.py")
+
+    assert result.returncode == 2
+    assert "py-check.sh stopped on an unexpected error (exit 1)" in result.stderr
+
+
+def test_gate_step_returns_when_a_leftover_child_holds_its_output(harness_repo):
+    # FR-003: a step that exits but leaves a background child with its stdout
+    # open must not hold the gate until that child ends.
+    repo = harness_repo
+    pidfile = repo.parent / "child.pid"
+    script = (
+        '. "$1"; gate_start; '
+        'run_check step bash -c "sleep 30 & echo \\$! >\\"$2\\"; exit 0"; '
+        'printf "outcome=[%s]" "$gate_outcome"'
+    )
+    env = _clean_env()
+    env["PATH"] = f"{repo.parent / 'bin'}{os.pathsep}{env['PATH']}"
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "_", str(repo / ".claude" / "hooks" / "lib.sh"),
+             str(pidfile)],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+    finally:
+        if pidfile.exists():
+            subprocess.run(["kill", pidfile.read_text().strip()], check=False)
+    assert time.monotonic() - start < 5
+    assert result.stdout == "outcome=[]"
+
+
+def test_turn_start_prunes_stale_ctx_and_exception_files(harness_repo):
+    repo = harness_repo
+    sd = state_dir(repo)
+    sd.mkdir(parents=True, exist_ok=True)
+    old = [sd / "ctx-old.level", sd / "exception-old.notified"]
+    for f in old:
+        f.write_text("warn\n")
+        _age(f, 8 * DAY)
+    fresh = sd / "ctx-new.level"
+    fresh.write_text("warn\n")
+
+    assert turn_start(repo).returncode == 0
+
+    assert not any(f.exists() for f in old)
+    assert fresh.exists()
+
+
+@_NEEDS_DIR_PERMISSIONS
+def test_turn_start_survives_a_read_only_state_dir(harness_repo):
+    repo = harness_repo
+    sd = state_dir(repo)
+    sd.mkdir(parents=True, exist_ok=True)
+    stale = sd / "ctx-old.level"
+    stale.write_text("warn\n")
+    _age(stale, 8 * DAY)
+    sd.chmod(0o555)
+    try:
+        result = turn_start(repo)
+    finally:
+        sd.chmod(0o755)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    # FR-016: the prune ran, could not delete, and stayed quiet about it.
+    assert stale.exists()
+    assert result.stderr == ""
+
+
+_BOUNDARY = {"type": "system", "subtype": "compact_boundary"}
+
+
+def test_context_after_compaction_with_no_usage_is_silent(harness_repo):
+    repo = harness_repo
+    t = repo.parent / "t.jsonl"
+
+    assert ctx_start(repo, write_transcript(t, [130_000, _BOUNDARY, _FILLER])) is None
+    assert not ctx_marker(repo).exists()
+
+    # An unknown reading leaves an existing marker as it is, too.
+    assert ctx_start(repo, write_transcript(t, [125_000])) is not None
+    assert ctx_start(repo, write_transcript(t, [10_000, _BOUNDARY, _FILLER])) is None
+    assert ctx_marker(repo).read_text().strip() == "warn"
+
+
+def test_context_after_compaction_rearms_on_low_usage(harness_repo):
+    repo = harness_repo
+    t = repo.parent / "t.jsonl"
+
+    assert ctx_start(repo, write_transcript(t, [125_000])) is not None
+    assert ctx_start(repo, write_transcript(t, [125_000, _BOUNDARY, 10_000])) is None
+    assert not ctx_marker(repo).exists()
+    again = ctx_start(repo, write_transcript(t, [125_000, _BOUNDARY, 10_000, 125_000]))
+    assert again is not None
+
+
+# ---------------------------------------------------------------------------
+# 012 US4: what a turn's Stop runs, by tier (T047, FR-021, FR-023, R15)
+# ---------------------------------------------------------------------------
+
+_DRIFT_TEST = "tests/test_context_drift.py"
+
+
+def _commit_file(repo: Path, rel: str, text: str) -> Path:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", f"add {rel}")
+    return path
+
+
+def _suite_dirs(repo: Path) -> list[str]:
+    return sorted(c[c.index("--directory") + 1] for c in calls_for(repo, "pytest"))
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "CLAUDE.md",
+        ".claude/agents/py-codereviewer.md",
+        "registry/agents/a/manifest.yaml",
+        "specs/001-x/spec.md",
+    ],
+)
+def test_docs_turn_runs_only_the_drift_test(harness_repo, rel):
+    repo = harness_repo
+    path = _commit_file(repo, rel, "before\n")
+    turn_start(repo)
+    path.write_text("after\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert calls_for(repo, "ruff") == []
+    [drift] = calls_for(repo, "pytest")
+    assert _DRIFT_TEST in drift
+
+
+@pytest.mark.parametrize("rel", [".claude/hooks/lib.sh", ".claude/settings.json"])
+def test_hook_or_settings_turn_runs_the_full_gate(harness_repo, rel):
+    repo = harness_repo
+    if rel == ".claude/settings.json":
+        _commit_file(repo, rel, "{}\n")
+    path = repo / rel
+    turn_start(repo)
+    path.write_text(path.read_text() + "\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert calls_for(repo, "ruff") == []
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+
+
+def test_both_tiers_changed_runs_the_full_gate_once(harness_repo):
+    repo = harness_repo
+    claude_md = _commit_file(repo, "CLAUDE.md", "before\n")
+    turn_start(repo)
+    claude_md.write_text("after\n")
+    (repo / "pkg" / "clean.py").write_text("VALUE = 2\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    [ruff] = calls_for(repo, "ruff")
+    assert "pkg/clean.py" in ruff
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+    assert not any(_DRIFT_TEST in c for c in calls_for(repo, "pytest"))
+
+
+def test_old_snapshot_runs_the_full_gate_once(harness_repo):
+    repo = harness_repo
+    turn_start(repo)
+    # A snapshot as the 010 hook wrote it: only the *.py, *pyproject.toml and
+    # *uv.lock lines. The files of the new pathspecs then show up as added.
+    old = [
+        line for line in snapshot(repo).read_text().splitlines()
+        if line.endswith((".py", "pyproject.toml", "uv.lock"))
+    ]
+    snapshot(repo).write_text("".join(f"{line}\n" for line in old))
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+    assert not any(_DRIFT_TEST in c for c in calls_for(repo, "pytest"))
+
+    # The next turn takes a full snapshot, so nothing runs again.
+    turn_start(repo)
+    assert stop(repo).returncode == 0
+    assert len(calls_for(repo, "pytest")) == 2
+
+
+def test_non_ascii_py_on_head_fallback_runs_the_full_gate(harness_repo):
+    # FR-021, R15: with no snapshot, git's default core.quotePath would print
+    # "pkg/na\303\257ve.py" in quotes; the path must still be read as a .py file.
+    repo = harness_repo
+    # FR-021: commit the fixture's hook copies, so the non-ASCII file is the
+    # only changed path and the suites run because of it.
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "hooks")
+    (repo / "pkg" / "naïve.py").write_text("VALUE = 2\n")
+
+    result = stop(repo)
+
+    assert result.returncode == 0, result.stderr
+    [ruff] = calls_for(repo, "ruff")
+    assert "pkg/naïve.py" in ruff
+    assert _suite_dirs(repo) == [str(repo), str(repo / "orchestration")]
+
+
+def test_hook_scripts_pass_shellcheck():
+    # FR-023, R17: -x follows `source ./lib.sh` through each script's
+    # source-path directive.
+    if shutil.which("shellcheck") is None:
+        pytest.skip("shellcheck not installed: hook scripts were not linted")
+    scripts = sorted(str(p.relative_to(REPO_ROOT)) for p in HOOKS_DIR.glob("*.sh"))
+    result = subprocess.run(
+        ["shellcheck", "-x", *scripts], cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

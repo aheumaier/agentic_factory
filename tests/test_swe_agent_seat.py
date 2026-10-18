@@ -117,7 +117,7 @@ def _rejected(resets_at=1791655200):
 
 
 def _stub_pr(monkeypatch, calls: list | None = None):
-    def fake_push_and_open_pr(checkout, repo, branch, title):
+    def fake_push_and_open_pr(checkout, repo, branch, title, notes=""):  # FR-011
         if calls is not None:
             calls.append(branch)
         return "created"
@@ -323,8 +323,19 @@ def test_prompt_carries_resume_and_checkpoint_rules():
     prompt = swe_agent.IMPLEMENT_PROMPT
     assert prompt.startswith("/speckit-implement")
     assert "`[X]`" in prompt and "skip them" in prompt
-    assert "git add -A && git commit" in prompt
-    assert "do not run `git push`" in " ".join(prompt.split())
+    # FR-011: the harness commits; the model reports its checks instead.
+    joined = " ".join(prompt.split())
+    assert "Do not commit: the harness commits your work." in joined
+    assert "list the checks you ran" in joined
+    assert "git commit" not in prompt
+    assert "do not run `git push`" in joined
+
+
+def test_task_and_feedback_prompts_do_not_ask_to_commit():
+    # FR-011 (R8): per-task sessions report their checks too, and Gate
+    # feedback no longer asks the model to commit.
+    assert "list the checks you ran" in " ".join(swe_agent.TASK_PROMPT.split())
+    assert "committing" not in swe_agent.FEEDBACK_PROMPT_SUFFIX
 
 
 def test_checkpoint_push_follows_branch_not_head(origin, monkeypatch):
@@ -389,7 +400,7 @@ def _capture_log(monkeypatch) -> list:
     checkout (oldest first) at the moment it would push."""
     subjects: list = []
 
-    def fake_push_and_open_pr(checkout, repo, branch, title):
+    def fake_push_and_open_pr(checkout, repo, branch, title, notes=""):  # FR-011
         log = _git("log", "--reverse", "--format=%s", f"origin/{branch}..HEAD", cwd=checkout)
         subjects.extend(log.splitlines())
         return "created"
@@ -545,7 +556,7 @@ def test_checkpoint_uses_fallback_identity_when_none_is_configured(origin, monke
         monkeypatch.delenv(var, raising=False)
     authors: list = []
 
-    def fake_push_and_open_pr(checkout, repo, branch, title):
+    def fake_push_and_open_pr(checkout, repo, branch, title, notes=""):  # FR-011
         authors.append(_git("log", "-1", "--format=%an <%ae>", cwd=checkout))
         return "created"
     monkeypatch.setattr(swe_agent, "push_and_open_pr", fake_push_and_open_pr)
@@ -585,6 +596,60 @@ def test_first_seat_feedback_retry_without_new_commit_still_fails(origin, monkey
 
     with pytest.raises(RuntimeError, match="made no new commit"):
         _main("coverage too low")
+
+
+def test_failed_harness_commit_is_not_reported_as_no_change(origin, monkeypatch, capsys):
+    # specs/012 FR-011: the model no longer commits, so when the harness's own
+    # commit fails (e.g. a target-repo commit hook) the work is uncommitted,
+    # and the message must say so instead of "none was made".
+    origin.seed(ID_LESS_TASK)
+    _stub_pr(monkeypatch)
+    real_run = swe_agent._run
+
+    def failing_commit(cmd, cwd=None):
+        if cmd[0] == "git" and "commit" in cmd:
+            raise subprocess.CalledProcessError(1, cmd, output="", stderr="hook rejected")
+        return real_run(cmd, cwd=cwd)
+    monkeypatch.setattr(swe_agent, "_run", failing_commit)
+    monkeypatch.setattr(swe_agent, "query", _scripted(lambda cwd: _edit(cwd, "a.py")))
+
+    with pytest.raises(RuntimeError, match="made no new commit.*commit failed"):
+        _main()
+    assert "checkpoint commit failed" in capsys.readouterr().err
+
+
+def test_failed_final_harness_commit_fails_the_run(origin, monkeypatch, capsys):
+    # specs/012 FR-011: the tick's checkpoint lands, so HEAD moves, but the
+    # final "checkpoint: end of ..." commit fails. The edit after the tick
+    # is uncommitted, so the run must fail instead of pushing partial work.
+    origin.seed("# Tasks\n\n- [ ] T001 one\n")
+    pr_calls: list = []
+    _stub_pr(monkeypatch, pr_calls)
+    real_run = swe_agent._run
+
+    def failing_end_commit(cmd, cwd=None):
+        if cmd[0] == "git" and "commit" in cmd and any("end of" in c for c in cmd):
+            raise subprocess.CalledProcessError(1, cmd, output="", stderr="hook rejected")
+        return real_run(cmd, cwd=cwd)
+    monkeypatch.setattr(swe_agent, "_run", failing_end_commit)
+    monkeypatch.setattr(swe_agent, "query", _scripted(
+        lambda cwd: (_edit(cwd, "a.py"), _tick(cwd, "T001")),
+        lambda cwd: _edit(cwd, "b.py"),
+    ))
+
+    before = _origin_head(origin.bare)
+
+    with pytest.raises(RuntimeError, match="final commit failed.*pushed to"):
+        _main()
+    assert pr_calls == []
+    err = capsys.readouterr().err
+    assert "hook rejected" in err
+    # The T057 review: the task checkpoint already made is pushed, so the
+    # next attempt resumes from it instead of losing it with the sandbox.
+    assert _origin_head(origin.bare) != before
+    # The task session's own end commit is retried by the final one, but the
+    # final commit is not retried, so its stderr line must not say so.
+    assert err.rstrip().endswith("checkpoint commit failed: hook rejected")
 
 
 # --- specs/011 F2: the reading's own reset time travels in the status line -----
@@ -846,3 +911,174 @@ def test_task_prompt_names_one_task_and_forbids_commit_and_push():
     assert "mark T002 `[X]`" in prompt and "STOP" in prompt
     assert "Do not commit" in prompt
     assert "Do not run `git push`" in prompt
+
+
+# --- specs/012 FR-011: verification notes in the PR ------------------------------
+
+NOTES_HEADER = "## Agent verification notes"
+ID_LESS_TASK = "# Tasks\n\n- [ ] do it\n"  # one /speckit-implement session
+
+
+def _stub_gh(monkeypatch, create_error: str | None = None, comment_error: str | None = None):
+    """Real git against the bare origin; every `gh` call is recorded with the
+    --body-file's contents read at call time (the file is removed after)."""
+    calls: list = []
+    real_run = swe_agent._run
+
+    def fake_run(cmd, cwd=None):
+        if cmd[0] != "gh":
+            return real_run(cmd, cwd=cwd)
+        body = None
+        if "--body-file" in cmd:
+            body = Path(cmd[cmd.index("--body-file") + 1]).read_text()
+        calls.append((cmd, body))
+        if cmd[1:3] == ["pr", "list"]:
+            return '[{"url": "https://github.com/o/r/pull/7"}]'
+        error = {"create": create_error, "comment": comment_error}.get(cmd[2])
+        if error is not None:
+            raise subprocess.CalledProcessError(1, cmd, output="", stderr=error)
+        return "https://github.com/o/r/pull/7"
+    monkeypatch.setattr(swe_agent, "_run", fake_run)
+    return calls
+
+
+def _gh_body(calls: list, verb: str) -> str | None:
+    return next((body for cmd, body in calls if cmd[1:3] == ["pr", verb]), None)
+
+
+def _fenced(body: str) -> str:
+    """The notes text between the section's opening and closing fence."""
+    section = body[body.index(NOTES_HEADER):]
+    assert section.startswith(f"{NOTES_HEADER}\n\n~~~text\n") and section.endswith("\n~~~")
+    return section[len(f"{NOTES_HEADER}\n\n~~~text\n"):-len("\n~~~")]
+
+
+def _one_session(origin, monkeypatch, result: str):
+    origin.seed(ID_LESS_TASK)
+    monkeypatch.setattr(swe_agent, "query", _fake_query(
+        ("commit", "a.py"), sdk.ResultMessage(result=result),
+    ))
+
+
+def test_pr_body_has_verification_notes_after_one_session(origin, monkeypatch):
+    _one_session(origin, monkeypatch, "ran pytest: 3 passed")
+    calls = _stub_gh(monkeypatch)
+
+    assert _main() == 0
+    assert _gh_body(calls, "create").endswith(
+        f"\n\n{NOTES_HEADER}\n\n~~~text\nran pytest: 3 passed\n~~~"
+    )
+    assert _gh_body(calls, "comment") is None
+
+
+@pytest.mark.parametrize("comment_error", [None, "HTTP 502"])
+def test_notes_go_to_a_comment_when_the_pr_exists(origin, monkeypatch, capsys, comment_error):
+    _one_session(origin, monkeypatch, "ran pytest: 3 passed")
+    calls = _stub_gh(
+        monkeypatch,
+        create_error='a pull request for branch "feat-x" into branch "main" already exists',
+        comment_error=comment_error,
+    )
+
+    # A failed comment is a warning only: the commits and the PR are in place.
+    assert _main() == 0
+    cmd, body = next((c, b) for c, b in calls if c[1:3] == ["pr", "comment"])
+    # FR-011: the comment targets the PR's URL, not the branch: gh reads an
+    # all-digit branch (e.g. `123`) as a PR number, which is another PR.
+    assert cmd[:4] == ["gh", "pr", "comment", "https://github.com/o/r/pull/7"]
+    assert cmd[4] == "--body-file"
+    assert body.splitlines()[0] == NOTES_HEADER
+    assert "ran pytest: 3 passed" in body
+    if comment_error:
+        assert "HTTP 502" in capsys.readouterr().err
+
+
+def test_notes_comment_warns_when_the_pr_lookup_finds_none(tmp_path, monkeypatch, capsys):
+    """FR-011: the comment step only warns, also when verify_pr_exists raises
+    RuntimeError (gh lists no PR). Called directly: an end-to-end run would
+    fail on run()'s own final verify_pr_exists with the same empty list."""
+    def fake_run(cmd, cwd=None):
+        if cmd[:3] == ["gh", "pr", "create"]:
+            raise subprocess.CalledProcessError(
+                1, cmd, output="", stderr="a pull request for branch already exists",
+            )
+        return "[]" if cmd[:3] == ["gh", "pr", "list"] else ""
+    monkeypatch.setattr(swe_agent, "_run", fake_run)
+
+    out = swe_agent.push_and_open_pr(tmp_path, "o/r", BRANCH, "t", notes="ran pytest")
+
+    assert "already exists" in out
+    assert "could not post the verification notes" in capsys.readouterr().err
+
+
+def test_notes_are_fenced(origin, monkeypatch):
+    _one_session(origin, monkeypatch, "Fixes #1\n@someone\n~~~\nend")
+    calls = _stub_gh(monkeypatch)
+
+    assert _main() == 0
+    text = _fenced(_gh_body(calls, "create"))
+    assert "Fixes #1" in text and "@someone" in text
+    assert text.splitlines() == ["Fixes #1", "@someone", "~~\\~", "end"]
+
+
+def test_per_task_notes_keep_task_order(origin, monkeypatch):
+    origin.seed("# Tasks\n\n- [ ] T001 one\n- [ ] T002 two\n")
+    calls = _stub_gh(monkeypatch)
+    sessions: list = []
+    monkeypatch.setattr(swe_agent, "query", _task_sessions(sessions, {
+        task: [lambda cwd, t=task: _edit(cwd, f"{t}.py"), lambda cwd, t=task: _tick(cwd, t),
+               sdk.ResultMessage(result=f"checked {task}")]
+        for task in ("T001", "T002")
+    }))
+
+    assert _main() == 0
+    text = _fenced(_gh_body(calls, "create"))
+    assert text == "### T001\n\nchecked T001\n\n### T002\n\nchecked T002"
+
+
+def test_notes_are_capped(origin, monkeypatch):
+    _one_session(origin, monkeypatch, "x" * 5000)
+    calls = _stub_gh(monkeypatch)
+
+    assert _main() == 0
+    text = _fenced(_gh_body(calls, "create"))
+    assert len(text) <= 4000
+    assert text.endswith("\n\n… (truncated)")
+
+
+def test_notes_with_fences_are_capped_after_escaping(origin, monkeypatch):
+    # Escaping adds a character per `~~~`, so the cap must come after it.
+    _one_session(origin, monkeypatch, "~~~\n" * 2000)
+    calls = _stub_gh(monkeypatch)
+
+    assert _main() == 0
+    text = _fenced(_gh_body(calls, "create"))
+    assert len(text) <= 4000
+    assert "~~~" not in text
+    assert text.endswith("\n\n… (truncated)")
+
+
+def test_notes_do_not_publish_tokens(origin, monkeypatch):
+    # The model's shell inherits GH_TOKEN; its final message must not carry
+    # that value into the PR.
+    monkeypatch.setenv("GH_TOKEN", GH)
+    _one_session(origin, monkeypatch, f"checked auth: GH_TOKEN={GH}")
+    calls = _stub_gh(monkeypatch)
+
+    assert _main() == 0
+    body = _gh_body(calls, "create")
+    assert GH not in body
+    assert "checked auth: GH_TOKEN=***" in _fenced(body)
+
+
+@pytest.mark.parametrize("case", ["empty result", "blank result", "no session"])
+def test_notes_are_omitted_when_empty(origin, monkeypatch, case):
+    if case == "no session":
+        origin.seed(DONE_TASKS)  # all-done shortcut: no model session runs
+    else:
+        _one_session(origin, monkeypatch, "" if case == "empty result" else "  \n ")
+    calls = _stub_gh(monkeypatch)
+
+    assert _main() == 0
+    assert NOTES_HEADER not in _gh_body(calls, "create")
+    assert _gh_body(calls, "comment") is None

@@ -69,6 +69,13 @@ Anthropic, a documented §3.4 deviation.
   committed as `checkpoint: end of run` on a normal finish. Commits are
   local; the push happens later. Without a configured git identity, the
   commit uses `swe-agent <swe-agent@users.noreply.github.com>`.
+- **The harness commits, the model reports (specs/012 FR-011).** No prompt
+  asks the model to commit; the harness commits its work (checkpoints and the
+  end-of-run commit). The model's final message lists the checks it ran and
+  why any still fail. `agent.py` adds it to the PR body as "Agent
+  verification notes" (fenced, at most 4000 characters; one `### <ID>` part
+  per task session), or posts it as a PR comment when the PR already exists.
+  Notes are not carried across seats.
 - **Seat outcomes.** If the seat runs out (`SeatExhausted`) or its token is
   rejected (`SeatInvalid`) mid-run, `agent.py` pushes every commit on the
   branch and prints a `{"seat_status": …}` JSON line last. It then exits

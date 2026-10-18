@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-context.sh",
+            "command": "p=$(cat); d=$(printf '%s' \"$p\" | jq -r '.cwd // empty' 2>/dev/null); t=$(cd \"${d:-.}\" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd \"./$c\" && pwd); for r in \"$t\" \"$CLAUDE_PROJECT_DIR\"; do if [ -n \"$r\" ] && [ -f \"$r/.claude/hooks/session-context.sh\" ]; then printf '%s' \"$p\" | bash \"$r/.claude/hooks/session-context.sh\"; exit $?; fi; done; echo '{\"systemMessage\":\"[AF-HOOKS] The repo hook scripts (.claude/hooks/session-context.sh) were not found in this worktree or in the launch directory, so this call cannot be checked. To proceed: start a new Claude Code session in an existing worktree of this repo (the main checkout or claude --worktree), or restore .claude/hooks/ from a terminal outside Claude Code.\"}'; exit 0",
             "timeout": 10
           }
         ]
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh turn-start",
+            "command": "p=$(cat); d=$(printf '%s' \"$p\" | jq -r '.cwd // empty' 2>/dev/null); t=$(cd \"${d:-.}\" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd \"./$c\" && pwd); for r in \"$t\" \"$CLAUDE_PROJECT_DIR\"; do if [ -n \"$r\" ] && [ -f \"$r/.claude/hooks/py-check.sh\" ]; then printf '%s' \"$p\" | bash \"$r/.claude/hooks/py-check.sh\" turn-start; exit $?; fi; done; echo '{\"systemMessage\":\"[AF-HOOKS] The repo hook scripts (.claude/hooks/py-check.sh) were not found in this worktree or in the launch directory, so this call cannot be checked. To proceed: start a new Claude Code session in an existing worktree of this repo (the main checkout or claude --worktree), or restore .claude/hooks/ from a terminal outside Claude Code.\"}'; exit 0",
             "timeout": 30,
             "statusMessage": "turn snapshot"
           }
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/policy.sh",
+            "command": "p=$(cat); d=$(printf '%s' \"$p\" | jq -r '.cwd // empty' 2>/dev/null); t=$(cd \"${d:-.}\" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd \"./$c\" && pwd); for r in \"$t\" \"$CLAUDE_PROJECT_DIR\"; do if [ -n \"$r\" ] && [ -f \"$r/.claude/hooks/policy.sh\" ]; then printf '%s' \"$p\" | bash \"$r/.claude/hooks/policy.sh\"; exit $?; fi; done; echo '[AF-HOOKS] The repo hook scripts (.claude/hooks/policy.sh) were not found in this worktree or in the launch directory, so this call cannot be checked. To proceed: start a new Claude Code session in an existing worktree of this repo (the main checkout or claude --worktree), or restore .claude/hooks/ from a terminal outside Claude Code.' >&2; exit 2",
             "timeout": 300,
             "statusMessage": "repo policy (AF-*)"
           }
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh edit",
+            "command": "p=$(cat); d=$(printf '%s' \"$p\" | jq -r '.cwd // empty' 2>/dev/null); t=$(cd \"${d:-.}\" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd \"./$c\" && pwd); for r in \"$t\" \"$CLAUDE_PROJECT_DIR\"; do if [ -n \"$r\" ] && [ -f \"$r/.claude/hooks/py-check.sh\" ]; then printf '%s' \"$p\" | bash \"$r/.claude/hooks/py-check.sh\" edit; exit $?; fi; done; echo '{\"systemMessage\":\"[AF-HOOKS] The repo hook scripts (.claude/hooks/py-check.sh) were not found in this worktree or in the launch directory, so this call cannot be checked. To proceed: start a new Claude Code session in an existing worktree of this repo (the main checkout or claude --worktree), or restore .claude/hooks/ from a terminal outside Claude Code.\"}'; exit 0",
             "timeout": 60,
             "statusMessage": "ruff (edited file)"
           }
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-check.sh stop",
+            "command": "p=$(cat); d=$(printf '%s' \"$p\" | jq -r '.cwd // empty' 2>/dev/null); t=$(cd \"${d:-.}\" 2>/dev/null && c=$(git rev-parse --show-cdup 2>/dev/null) && cd \"./$c\" && pwd); for r in \"$t\" \"$CLAUDE_PROJECT_DIR\"; do if [ -n \"$r\" ] && [ -f \"$r/.claude/hooks/py-check.sh\" ]; then printf '%s' \"$p\" | bash \"$r/.claude/hooks/py-check.sh\" stop; exit $?; fi; done; echo '{\"systemMessage\":\"[AF-HOOKS] The repo hook scripts (.claude/hooks/py-check.sh) were not found in this worktree or in the launch directory, so this call cannot be checked. To proceed: start a new Claude Code session in an existing worktree of this repo (the main checkout or claude --worktree), or restore .claude/hooks/ from a terminal outside Claude Code.\"}'; exit 0",
             "timeout": 300,
             "statusMessage": "ruff + pytest (this turn's changes)"
           }

@@ -1,5 +1,7 @@
 # Contract: Harness Hook Interface (010)
 
+> Amended by `specs/012-dev-harness-followups/contracts/hook-interface.md` (launcher, AF-HOOKS, gate time limit, stop steps 1-5, matching rules).
+
 The interface between Claude Code and this repo's hook scripts. Tests in
 `tests/test_harness_hooks.py` are written against this contract.
 
@@ -100,6 +102,9 @@ rounded down to whole k.
   **exit 2** (fed back to the model). **Never runs pytest** (FR-005).
 
 ### `py-check.sh stop`
+
+> Steps 1-5 are replaced by 012's contract, "`stop`" (a red-twice turn keeps its snapshot, FR-013).
+
 1. `resolve_snapshot` (adopts a pending snapshot if `session_id` changed mid-turn),
    then compute the changed set (snapshot, or the HEAD fallback). Empty → delete the
    snapshot, exit 0, no checks (FR-003).

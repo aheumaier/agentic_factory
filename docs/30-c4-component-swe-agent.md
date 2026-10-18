@@ -92,11 +92,14 @@ flowchart TB
   isn't a new risk layered on top of the already-unsandboxed, full-Bash
   "Known gap" documented in `harness/swe-agent/SKILL.md`.
 - **`verify_left_main()` / `verify_new_commit()`** are the deterministic
-  safety net around the model's own commit: the prompt tells the model to
-  commit and stop (not push, not open a PR), and these two checks confirm
-  it actually did — HEAD moved off `main`/`master`, and a new commit
-  exists — before any push happens.
+  safety net around the harness's own commits: the model only edits files
+  and reports its checks; the harness commits (a checkpoint each time a
+  task is ticked, plus one commit at the end of the run; specs/012
+  FR-011). These two checks confirm HEAD moved off `main`/`master` and a
+  new commit exists before any push happens. If the harness's commit
+  failed, `verify_new_commit()` says so instead of reporting "no change".
 - **`push_and_open_pr()` / `verify_pr_exists()`** are the only components
   that touch the outside world beyond the clone. If `gh pr create` reports
   the PR already exists, that's treated as success (idempotent re-entry),
-  not an error.
+  not an error; the verification notes then go to that PR as a comment,
+  addressed by its URL.
