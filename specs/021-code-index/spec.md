@@ -355,8 +355,8 @@ only if it improves its stage's metrics without lowering the gate pass rate.
   metrics by at least 20% (the keep threshold, a setting), or that lowers the gate pass rate (more than one run worse
   than the baseline), in the measurement MUST be turned off by default, with the reason written in the spec directory.
 - **FR-026**: The measurement MUST capture each session's tool calls (tool name, paths touched or returned, turn index)
-  in a measurement log kept in or linked from the spec directory. This data MUST NOT go into spec 018's ledger (018
-  FR-004 forbids tool input and output there).
+  in a measurement log kept in or linked from the spec directory. This data MUST NOT go into spec 018's ledger or spec
+  020's traces (018 FR-004 and 020 FR-008 forbid tool input and output there).
 
 **Out of scope**
 
@@ -434,6 +434,6 @@ only if it improves its stage's metrics without lowering the gate pass rate.
 - **Depended on by.** Spec 022 gives its explorer subagent this feature's index tools (022 FR-001, citing FR-021). The
   server name, the four tool names and the "index ready" outcome of FR-021 are the contract with 022.
 - **Changes to other specs.** None are made here. Spec 018 gets a new field (index use per stage) only if its owner
-  agrees; until then FR-021's interim record applies. Tool-call data stays outside 018's ledger (FR-026). Spec 022's
+  agrees; until then FR-021's interim record applies. Tool-call data stays outside 018's ledger and spec 020's traces, since both forbid tool inputs and outputs (018 FR-004, 020 FR-008); 020's spans can still give tool names and counts (FR-026). Spec 022's
   explorer is turned off in measurement runs (FR-022), which needs a setting in 022 or a run without it.
 - **Research files.** The report and its notes are tracked on main since 2026-10-17, so the paths above resolve.
