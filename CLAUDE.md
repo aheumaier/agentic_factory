@@ -29,6 +29,13 @@ instead of re-arguing:
 - `agent-swe-design.md` — one example foundation-tier *output*: a spec for a
   Claude-Agent-SDK software-engineer agent that consumes the factory's layers.
 
+Background research, not a design decision:
+`docs/research/reports/Agent native software factory architecture.md`
+(2026-10-13, four-layer section added 2026-10-14) compares published
+agent-native factory designs, maps them and a four-layer variant to this
+repo's layers, and ends with a ranked gap analysis of this repo. Its source notes are in
+`docs/research/research_notes/Agent native software factory architecture/`.
+
 Nothing here is wired end-to-end. Each layer directory is a scaffold with
 `TODO`s; see the layer table below for what's real vs. stub.
 
