@@ -6,6 +6,10 @@
 
 **Status**: Draft
 
+**Superseded in part (2026-10-16)**: FR-001..FR-003 (traceability) are replaced by `specs/015-outcome-gate`, which links
+each success criterion to a passing test and ignores commit messages. This spec keeps only its docstring, docs-touch and
+coverage-threshold checks.
+
 **Input**: User description: "Quality-Gate stage for the multi-agent SDLC pipeline (docs/70-multi-agent-pipeline-design.md §2's Quality-Gate subsection), positioned right after Eval-Gate in the pipeline, in the same objective-measurable-threshold family — extends the same success-criteria-parsing pattern the existing eval gate already uses rather than inventing a parallel mechanism. Enforces three concrete, blocking checks on a build's diff: (1) Traceability — every measurable-outcome bullet parsed from the spec's Measurable Outcomes section must be referenced at least once in the diff (test name, docstring, or commit message); (2) Documentation — every new/changed public function/class has a docstring, and any diff touching orchestration/harness code or introducing a new pipeline stage/layer must also touch a corresponding docs file, checked structurally (diff touches docs whenever diff touches orchestration/harness), not semantically judged; (3) Test coverage — combined line coverage across unit+integration+e2e tests meets or exceeds a configured threshold (default >=80%), read from whatever coverage tool the target repo already reports. Blocking only in 'full' mode per the pipeline's per-stage contract table (skipped entirely in 'vibe' mode — that mode switch itself is a separate feature). On failure, routes back to Build with the specific failing attribute (traceability/documentation/coverage) as feedback, sharing the same bounded retry budget as Eval-Gate/Automated-Review/Security-Review. This spec covers only the Quality-Gate check itself and its pass/fail/feedback contract — it does NOT cover the workflow's mode switch, retry budget mechanics, or escalation (separate feature), nor the Eval-Gate it extends the pattern from (pre-existing, already implemented)."
 
 ## User Scenarios & Testing *(mandatory)*
